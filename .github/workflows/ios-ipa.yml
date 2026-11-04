@@ -8,7 +8,7 @@ permissions:
   contents: write
 jobs:
   ios:
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -41,4 +41,5 @@ jobs:
           name: iOS test build ${{ github.run_number }}
           prerelease: true
           files: Understage-unsigned.ipa
+
 
