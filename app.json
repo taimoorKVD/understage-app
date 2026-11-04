@@ -1,0 +1,90 @@
+{
+  "expo": {
+    "name": "Understage",
+    "slug": "understage",
+    "scheme": "understage",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0E0B10",
+    "ios": {
+      "bundleIdentifier": "com.understage.app",
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Understage uses the camera to scan a colleague's QR code and to take photos you send in encrypted chats.",
+        "NSMicrophoneUsageDescription": "Understage uses the microphone for voice notes and encrypted audio calls.",
+        "NSPhotoLibraryUsageDescription": "Understage lets you pick photos to send in encrypted chats.",
+        "UIBackgroundModes": [
+          "audio",
+          "voip",
+          "remote-notification"
+        ],
+        "ITSAppUsesNonExemptEncryption": true,
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        },
+        "NSLocalNetworkUsageDescription": "Understage connects to your development server on the local network."
+      }
+    },
+    "android": {
+      "package": "com.understage.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#0E0B10",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-status-bar",
+      "expo-secure-store",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Understage uses the microphone for voice notes and encrypted audio calls."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Understage uses the camera to scan a colleague's QR code and to take photos you send in encrypted chats.",
+          "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Understage lets you pick photos to send in encrypted chats.",
+          "cameraPermission": "Understage uses the camera to take photos you send in encrypted chats."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#D4A64A"
+        }
+      ],
+      "expo-localization",
+      "expo-sqlite",
+      "expo-font",
+      [
+        "@config-plugins/react-native-webrtc",
+        {
+          "cameraPermission": "Understage uses the camera for calls.",
+          "microphonePermission": "Understage uses the microphone for voice notes and encrypted audio calls."
+        }
+      ],
+      "expo-iap"
+    ],
+    "experiments": {
+      "typedRoutes": false
+    },
+    "extra": {}
+  }
+}
