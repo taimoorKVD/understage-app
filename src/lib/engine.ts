@@ -14,6 +14,8 @@ import { phoneTimezone, tzAbbr, tzCity } from './time';
 import type { Conversation, SelfUser, ServerMessage, PublicUser } from './types';
 import { mergeMessageList, nextSyncCursor } from '../../shared/message-sync';
 import { MLS_DIRECTORY_ENABLED, publishMlsKeyPackagesAfterKeygen } from './mls';
+import { catchUpMls, closeAllMlsSessions, conversationCanUseMls, decryptMlsCipher, encryptMlsPlain, reconcileMlsMembership } from './mls-session';
+import { isMlsProtocol } from '../../shared/mls-protocol';
 
 const outbox = new Outbox<OutboxPayload>(items => { try { cache.outboxSave(items); } catch {} });
 const userKeys = new Map<string, string | null>();
@@ -83,7 +85,7 @@ async function signOutLocal() {
   socket?.disconnect(); socket = null; unsubs.forEach(u => u()); unsubs = [];
   await secure.clearSession(); apiSession.set(null);
   try { closeDb(); } catch {}
-  outbox.load([]); userKeys.clear();
+  outbox.load([]); userKeys.clear(); closeAllMlsSessions().catch(() => {});
   set({ status: 'signedOut', me: null, identity: null, conversations: {}, convOrder: [], messages: {}, workspaces: [], heldCount: 0, socketConnected: false });
 }
 export async function signOut() {
@@ -218,7 +220,9 @@ async function ingest(msgs: ServerMessage[]) {
   for (const m of msgs) {
     const existing = (st().messages[m.conversationId] ?? []).find(x => x.id === m.id || (m.senderId === me && x.clientId === m.clientId));
     let body: PlainMessage | null = existing?.body ?? null;
-    if (!body && m.ciphertext && m.nonce && sk) {
+    if (!body && m.ciphertext && (isMlsProtocol(m.protocol) || isMlsProtocol(m.nonce))) {
+      body = await decryptMlsCipher(me, m.conversationId, m.ciphertext);
+    } else if (!body && m.ciphertext && m.nonce && sk) {
       const pub = await keyFor(m.senderId);
       body = pub ? decryptPayload(m.nonce, m.ciphertext, pub, sk) : null;
       if (!body && pub) { userKeys.delete(m.senderId); const fresh = await keyFor(m.senderId); if (fresh && fresh !== pub) body = decryptPayload(m.nonce, m.ciphertext, fresh, sk); }
@@ -292,10 +296,13 @@ async function sendItem(item: OutboxItem<OutboxPayload>) {
   if (!identity) throw new PermanentSendError('Encryption keys missing on this phone');
   let conv = st().conversations[item.conversationId] ?? await refreshConversation(item.conversationId);
   if (conv.readonly) throw new PermanentSendError('This chat is read-only');
-  if (conv.e2eeError === 'GROUP_TOO_LARGE_FOR_E2EE') throw new PermanentSendError('This conversation is too large for end-to-end encryption');
-  if (conv.kind === 'group' && conv.memberCount > conv.members.length) throw new PermanentSendError('Encrypted chat is limited to 50 members in this build');
-  const noKey = conv.members.filter(m => !m.identityKey);
-  if (noKey.length) { conv = await refreshConversation(conv.id); const still = conv.members.filter(m => !m.identityKey); if (still.length) throw new PermanentSendError(`${still[0].displayName || 'A member'} hasn't set up encryption yet`); }
+  const useMls = conversationCanUseMls(conv);
+  if (!useMls && conv.e2eeError === 'GROUP_TOO_LARGE_FOR_E2EE') throw new PermanentSendError('This conversation is too large for end-to-end encryption');
+  if (!useMls && conv.kind === 'group' && conv.memberCount > conv.members.length) throw new PermanentSendError('Encrypted chat is limited to 50 members in this build');
+  if (!useMls) {
+    const noKey = conv.members.filter(m => !m.identityKey);
+    if (noKey.length) { conv = await refreshConversation(conv.id); const still = conv.members.filter(m => !m.identityKey); if (still.length) throw new PermanentSendError(`${still[0].displayName || 'A member'} hasn't set up encryption yet`); }
+  }
   const p = item.payload;
   if (p.file && 'attachment' in p.plain && !p.plain.attachment.id) {
     patchLocal(item.clientId, { stage: 'encrypting' });
@@ -307,8 +314,17 @@ async function sendItem(item: OutboxItem<OutboxPayload>) {
     localFiles.set(r.id, p.file.uri); cache.set(`file:${r.id}`, p.file.uri);
     patchLocal(item.clientId, { body: p.plain, stage: null });
   }
-  const payloads = encryptForRecipients(p.plain, conv.members.map(m => ({ id: m.id, publicKey: m.identityKey! })), identity.secretKey);
-  const r = await wrapErr(() => api<{ message: ServerMessage }>('POST', `/conversations/${conv.id}/messages`, { clientId: item.clientId, payloads }), conv.id);
+  let r: { message: ServerMessage };
+  if (useMls) {
+    await reconcileMlsMembership(conv, myId());
+    const sealed = await encryptMlsPlain(conv, myId(), p.plain);
+    r = await wrapErr(() => api<{ message: ServerMessage }>('POST', `/conversations/${conv.id}/messages`, {
+      clientId: item.clientId, protocol: 'mls', epoch: sealed.epoch, ciphertext: sealed.ciphertext,
+    }), conv.id);
+  } else {
+    const payloads = encryptForRecipients(p.plain, conv.members.map(m => ({ id: m.id, publicKey: m.identityKey! })), identity.secretKey);
+    r = await wrapErr(() => api<{ message: ServerMessage }>('POST', `/conversations/${conv.id}/messages`, { clientId: item.clientId, payloads }), conv.id);
+  }
   const m = r.message;
   putLocal({ key: m.id, id: m.id, clientId: m.clientId, conversationId: m.conversationId, seq: m.seq, senderId: m.senderId, createdAt: m.createdAt, body: p.plain, status: (m.status as LocalStatus) || 'sent', readBy: m.readBy, recipients: m.recipients, readByUserIds: m.readByUserIds });
   refreshConvsSoon();
@@ -427,6 +443,12 @@ function connectSocket() {
   });
   for (const ev of ['conversation:updated', 'contact:added']) socket.on(ev, (d: any) => { refreshConvsSoon(); set({ contactsVersion: st().contactsVersion + 1 }); bus.emit(ev, d); });
   socket.on('keys:changed', (d: { userId: string }) => { userKeys.delete(d.userId); refreshConvsSoon(); bus.emit('keys:changed', d); });
+  const onMls = (d: { conversationId: string }) => {
+    const uid = myId();
+    if (uid && d?.conversationId) catchUpMls(uid, d.conversationId).catch(() => {});
+  };
+  socket.on('mls:commit', onMls);
+  socket.on('mls:welcome', onMls);
   for (const ev of ['announcement:new', 'announcement:ack', 'workspace:wrapped']) socket.on(ev, (d: any) => { bus.emit(ev, d); if (ev === 'workspace:wrapped') { refreshConvsSoon(); api('GET', '/workspaces').then(r => set({ workspaces: r.workspaces })).catch(() => {}); } });
   socket.on('held:released', (d: { count: number }) => { bus.emit('held:released', d); refreshHeld().catch(() => {}); });
   for (const ev of ['call:incoming', 'call:accepted', 'call:ended', 'call:signal', 'call:answered-elsewhere']) socket.on(ev, (d: any) => bus.emit(ev, d));

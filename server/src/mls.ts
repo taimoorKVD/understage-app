@@ -16,6 +16,11 @@ import { HttpError, uid } from './util.js';
 /** OpenMLS default KeyPackage lifetime: 3 × 28 days, plus one hour of clock-skew slack. */
 export const MLS_MAX_LIFETIME_MS = (3 * 28 * 24 * 60 * 60 * 1000) + (60 * 60 * 1000);
 export const MLS_CIPHERSUITE = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519';
+/** Single stored ciphertext visible to every member (Phase 3 application messages). */
+export const MLS_SHARED_RECIPIENT = '*';
+export const MLS_PAYLOAD_NONCE = 'mls';
+/** Send/create cap for conversations that already have an MLS group. nacl stays at 50. */
+export const MLS_GROUP_LIMIT = 200;
 
 export function keyPackageHashRef(ciphertextB64: string): string {
   return crypto.createHash('sha256').update(Buffer.from(ciphertextB64, 'base64')).digest('hex');

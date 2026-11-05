@@ -11,7 +11,7 @@ import { HttpError, isOnShift, localParts, now, sha256, uid } from './util.js';
 import { genOtp, identifierHash, issueSession, rotateRefresh, validateDestination, verifyAccess } from './auth.js';
 import { signInvite, verifyInvite } from './invites.js';
 import { ConsoleOtpSender, MemoryPushSender, type OtpSender, type PushSender } from './providers.js';
-import { registerMlsRoutes } from './mls.js';
+import { registerMlsRoutes, assertMlsEnabled, MLS_SHARED_RECIPIENT, MLS_PAYLOAD_NONCE, MLS_GROUP_LIMIT } from './mls.js';
 import { iapVerificationReady, loadTrustedRootPems, planFromProductId, verifySignedTransaction } from './iap.js';
 
 export interface Emitter { toUser(userId: string, event: string, data: unknown): void; isOnline(userId: string): boolean }
@@ -45,6 +45,9 @@ export function publicUser(ctx: Ctx, u: any, viewerId?: string) {
       mlsSignaturePublicKey: u.mls_signature_key ?? null,
       mlsCredentialIdentity: u.mls_credential_identity ?? null,
       mlsKeyUpdatedAt: u.mls_key_updated_at ?? null,
+      mlsReady: !!(u.mls_signature_key) || !!ctx.db.prepare(
+        'SELECT 1 FROM mls_key_packages WHERE user_id=? AND not_before<=? AND not_after>=? LIMIT 1',
+      ).get(u.id, ctx.clock(), ctx.clock()),
     } : {}),
     timezone: u.timezone, localTime: lp.hhmm, onShift: isOnShift(u, ctx.clock()),
     shift: { start: u.shift_start, end: u.shift_end, days: JSON.parse(u.work_days) },
@@ -176,7 +179,11 @@ export function buildApp(opts: Omit<Partial<Ctx>, 'cfg'> & { cfg?: Partial<Confi
   };
 
   const serializeMessage = (m: any, viewerId: string) => {
-    const p = db.prepare('SELECT nonce, ciphertext FROM message_payloads WHERE message_id=? AND recipient_id=?').get(m.id, viewerId) as any;
+    const protocol = (m.protocol as string) || 'nacl';
+    let p = db.prepare('SELECT nonce, ciphertext FROM message_payloads WHERE message_id=? AND recipient_id=?').get(m.id, viewerId) as any;
+    if (!p && protocol === 'mls') {
+      p = db.prepare('SELECT nonce, ciphertext FROM message_payloads WHERE message_id=? AND recipient_id=?').get(m.id, MLS_SHARED_RECIPIENT) as any;
+    }
     let status: string | undefined, readBy = 0, deliveredTo = 0, recipients = 0;
     if (m.sender_id === viewerId) {
       const rs = db.prepare('SELECT user_id, delivered_at, read_at FROM receipts WHERE message_id=? AND user_id != ?').all(m.id, viewerId) as any[];
@@ -186,7 +193,7 @@ export function buildApp(opts: Omit<Partial<Ctx>, 'cfg'> & { cfg?: Partial<Confi
     }
     return {
       id: m.id, seq: m.seq, conversationId: m.conversation_id, senderId: m.sender_id, clientId: m.client_id, kind: m.kind,
-      createdAt: m.created_at, nonce: p?.nonce ?? null, ciphertext: p?.ciphertext ?? null, status, readBy, deliveredTo, recipients,
+      createdAt: m.created_at, protocol, nonce: p?.nonce ?? null, ciphertext: p?.ciphertext ?? null, status, readBy, deliveredTo, recipients,
       readByUserIds: m.sender_id === viewerId ? ((m as any)._readByUserIds as string[] | undefined) : undefined,
     };
   };
@@ -199,6 +206,8 @@ export function buildApp(opts: Omit<Partial<Ctx>, 'cfg'> & { cfg?: Partial<Confi
     const unread = (db.prepare('SELECT COUNT(*) n FROM messages WHERE conversation_id=? AND seq>? AND sender_id!=?').get(c.id, me?.last_read_seq || 0, viewerId) as any).n;
     const ws = c.workspace_id ? db.prepare('SELECT id,name,initial,wrapped_at FROM workspaces WHERE id=?').get(c.workspace_id) as any : null;
     const lastAnn = c.workspace_id ? db.prepare('SELECT title, created_at FROM announcements WHERE workspace_id=? ORDER BY created_at DESC LIMIT 1').get(c.workspace_id) as any : null;
+    const mlsGroup = db.prepare('SELECT group_id, epoch FROM mls_groups WHERE conversation_id=?').get(c.id) as any;
+    const mlsEstablished = !!(mlsGroup && mlsGroup.epoch != null);
     return {
       id: c.id, kind: c.kind, title: c.title, workspaceId: c.workspace_id, readonly: !!c.readonly || !!ws?.wrapped_at, createdAt: c.created_at,
       memberCount, myRole: me?.role, lastReadSeq: me?.last_read_seq || 0, unread,
@@ -206,7 +215,10 @@ export function buildApp(opts: Omit<Partial<Ctx>, 'cfg'> & { cfg?: Partial<Confi
       lastMessage: last ? serializeMessage(last, viewerId) : null,
       workspace: ws ? { id: ws.id, name: ws.name, initial: ws.initial, wrapped: !!ws.wrapped_at } : null,
       lastAnnouncement: lastAnn ? { title: lastAnn.title, createdAt: lastAnn.created_at } : null,
-      e2eeError: memberCount > E2EE_GROUP_LIMIT ? 'GROUP_TOO_LARGE_FOR_E2EE' : null,
+      e2eeError: memberCount > E2EE_GROUP_LIMIT && !mlsEstablished ? 'GROUP_TOO_LARGE_FOR_E2EE' : null,
+      ...(ctx.cfg.mlsDirectoryEnabled ? {
+        mls: { groupId: mlsGroup?.group_id ?? null, epoch: mlsGroup?.epoch ?? null },
+      } : {}),
     };
   };
 
@@ -490,7 +502,8 @@ export function buildApp(opts: Omit<Partial<Ctx>, 'cfg'> & { cfg?: Partial<Confi
     }
     for (const m of b.memberIds) getUser(m);
     const unique = [...new Set([req.userId, ...b.memberIds])];
-    if (unique.length > E2EE_GROUP_LIMIT) throw new HttpError(409, 'GROUP_TOO_LARGE_FOR_E2EE', `Encrypted groups are limited to ${E2EE_GROUP_LIMIT} members`);
+    const createCap = ctx.cfg.mlsDirectoryEnabled ? MLS_GROUP_LIMIT : E2EE_GROUP_LIMIT;
+    if (unique.length > createCap) throw new HttpError(409, 'GROUP_TOO_LARGE_FOR_E2EE', `Encrypted groups are limited to ${createCap} members`);
     const id = createConv('group', req.userId, b.memberIds, b.title);
     for (const m of b.memberIds) ctx.emit.toUser(m, 'conversation:updated', { conversationId: id });
     return { conversation: serializeConv(db.prepare('SELECT * FROM conversations WHERE id=?').get(id), req.userId) };
@@ -514,7 +527,8 @@ export function buildApp(opts: Omit<Partial<Ctx>, 'cfg'> & { cfg?: Partial<Confi
     const b = z.object({ userIds: z.array(z.string()).min(1) }).parse(req.body);
     const already = new Set((db.prepare('SELECT user_id FROM conversation_members WHERE conversation_id=?').all(id) as any[]).map(r => r.user_id as string));
     const adding = [...new Set(b.userIds)].filter(u => !already.has(u));
-    if (already.size + adding.length > E2EE_GROUP_LIMIT) throw new HttpError(409, 'GROUP_TOO_LARGE_FOR_E2EE', `Encrypted groups are limited to ${E2EE_GROUP_LIMIT} members`);
+    const addCap = ctx.cfg.mlsDirectoryEnabled ? MLS_GROUP_LIMIT : E2EE_GROUP_LIMIT;
+    if (already.size + adding.length > addCap) throw new HttpError(409, 'GROUP_TOO_LARGE_FOR_E2EE', `Encrypted groups are limited to ${addCap} members`);
     for (const u of b.userIds) { getUser(u); db.prepare('INSERT OR IGNORE INTO conversation_members (conversation_id,user_id,role,joined_at) VALUES (?,?,?,?)').run(id, u, 'member', ctx.clock()); }
     for (const m of convMembers(id)) ctx.emit.toUser(m, 'conversation:updated', { conversationId: id });
     return { ok: true, conversation: serializeConv(db.prepare('SELECT * FROM conversations WHERE id=?').get(id), req.userId) };
@@ -552,26 +566,46 @@ export function buildApp(opts: Omit<Partial<Ctx>, 'cfg'> & { cfg?: Partial<Confi
     if (conv.workspace_id) notWrapped(getWs(conv.workspace_id));
     const b = z.object({
       clientId: z.string().min(8).max(64),
-      payloads: z.array(z.object({ recipientId: z.string(), nonce: z.string().max(64), ciphertext: z.string().max(200_000) })).min(1),
+      protocol: z.enum(['nacl', 'mls']).default('nacl'),
+      epoch: z.number().int().min(0).optional(),
+      ciphertext: z.string().min(1).max(200_000).optional(),
+      payloads: z.array(z.object({ recipientId: z.string(), nonce: z.string().max(64), ciphertext: z.string().max(200_000) })).default([]),
     }).parse(req.body);
     const existing = db.prepare('SELECT * FROM messages WHERE sender_id=? AND client_id=?').get(req.userId, b.clientId) as any;
     if (existing) return { message: serializeMessage(existing, req.userId), duplicate: true }; // idempotent outbox retry
     const members = convMembers(id);
-    if (conv.kind !== 'direct' && members.length > E2EE_GROUP_LIMIT) {
-      throw new HttpError(409, 'GROUP_TOO_LARGE_FOR_E2EE', `This conversation has ${members.length} members, which exceeds the ${E2EE_GROUP_LIMIT}-person limit for end-to-end encrypted chat.`);
-    }
     if (conv.kind === 'direct') { const other = members.find(m => m !== req.userId)!; if (isBlocked(req.userId, other)) throw new HttpError(403, 'BLOCKED', 'You can’t message this person'); }
-    const given = new Set(b.payloads.map(p => p.recipientId));
-    const missing = members.filter(m => !given.has(m));
-    if (missing.length) throw new HttpError(409, 'MISSING_RECIPIENTS', `Encrypt for all members: ${missing.join(',')}`);
     const mid = uid('m_');
     const t = ctx.clock();
-    db.transaction(() => {
-      db.prepare('INSERT INTO messages (id,conversation_id,sender_id,client_id,created_at) VALUES (?,?,?,?,?)').run(mid, id, req.userId, b.clientId, t);
-      const ip = db.prepare('INSERT INTO message_payloads VALUES (?,?,?,?)');
-      const ir = db.prepare('INSERT INTO receipts (message_id,user_id) VALUES (?,?)');
-      for (const p of b.payloads) if (members.includes(p.recipientId)) { ip.run(mid, p.recipientId, p.nonce, p.ciphertext); if (p.recipientId !== req.userId) ir.run(mid, p.recipientId); }
-    })();
+    if (b.protocol === 'mls') {
+      assertMlsEnabled(ctx);
+      if (!b.ciphertext) throw new HttpError(400, 'MISSING_CIPHERTEXT', 'MLS messages need a single ciphertext');
+      const mlsGroup = db.prepare('SELECT * FROM mls_groups WHERE conversation_id=?').get(id) as any;
+      if (!mlsGroup || mlsGroup.epoch == null) throw new HttpError(409, 'MLS_GROUP_MISSING', 'Establish the MLS group before sending application messages');
+      if (members.length > MLS_GROUP_LIMIT) {
+        throw new HttpError(409, 'GROUP_TOO_LARGE_FOR_E2EE', `This conversation has ${members.length} members, which exceeds the ${MLS_GROUP_LIMIT}-person MLS limit.`);
+      }
+      db.transaction(() => {
+        db.prepare('INSERT INTO messages (id,conversation_id,sender_id,client_id,created_at,protocol) VALUES (?,?,?,?,?,?)').run(mid, id, req.userId, b.clientId, t, 'mls');
+        db.prepare('INSERT INTO message_payloads VALUES (?,?,?,?)').run(mid, MLS_SHARED_RECIPIENT, MLS_PAYLOAD_NONCE, b.ciphertext);
+        const ir = db.prepare('INSERT INTO receipts (message_id,user_id) VALUES (?,?)');
+        for (const member of members) if (member !== req.userId) ir.run(mid, member);
+      })();
+    } else {
+      if (conv.kind !== 'direct' && members.length > E2EE_GROUP_LIMIT) {
+        throw new HttpError(409, 'GROUP_TOO_LARGE_FOR_E2EE', `This conversation has ${members.length} members, which exceeds the ${E2EE_GROUP_LIMIT}-person limit for end-to-end encrypted chat.`);
+      }
+      if (!b.payloads.length) throw new HttpError(400, 'MISSING_PAYLOADS', 'Encrypt for all members');
+      const given = new Set(b.payloads.map(p => p.recipientId));
+      const missing = members.filter(m => !given.has(m));
+      if (missing.length) throw new HttpError(409, 'MISSING_RECIPIENTS', `Encrypt for all members: ${missing.join(',')}`);
+      db.transaction(() => {
+        db.prepare('INSERT INTO messages (id,conversation_id,sender_id,client_id,created_at) VALUES (?,?,?,?,?)').run(mid, id, req.userId, b.clientId, t);
+        const ip = db.prepare('INSERT INTO message_payloads VALUES (?,?,?,?)');
+        const ir = db.prepare('INSERT INTO receipts (message_id,user_id) VALUES (?,?)');
+        for (const p of b.payloads) if (members.includes(p.recipientId)) { ip.run(mid, p.recipientId, p.nonce, p.ciphertext); if (p.recipientId !== req.userId) ir.run(mid, p.recipientId); }
+      })();
+    }
     const row = db.prepare('SELECT * FROM messages WHERE id=?').get(mid) as any;
     db.prepare('UPDATE conversations SET last_seq=? WHERE id=?').run(row.seq, id);
     db.prepare('UPDATE conversation_members SET last_read_seq=? WHERE conversation_id=? AND user_id=?').run(row.seq, id, req.userId);
@@ -740,8 +774,8 @@ export function buildApp(opts: Omit<Partial<Ctx>, 'cfg'> & { cfg?: Partial<Confi
   });
   app.get('/announcements/:id/acks', { preHandler: auth }, async req => {
     const a = getAnn((req.params as any).id); wsAdmin(a.workspace_id, req.userId);
-    const rows = db.prepare('SELECT u.*, r.seen_at, r.acked_at, r.reminded_at FROM announcement_recipients r JOIN users u ON u.id=r.user_id WHERE r.announcement_id=? ORDER BY r.acked_at IS NOT NULL, r.seen_at IS NULL, u.display_name').all(a.id) as any[];
-    const map = (u: any) => ({ ...publicUser(ctx, u), seenAt: u.seen_at, ackedAt: u.acked_at, remindedAt: u.reminded_at });
+    const rows = db.prepare('SELECT u.*, r.seen_at, r.acked_at, r.reminded_at, d.name AS ws_dept_name FROM announcement_recipients r JOIN users u ON u.id=r.user_id LEFT JOIN workspace_members m ON m.workspace_id=? AND m.user_id=r.user_id LEFT JOIN departments d ON d.id=m.department_id WHERE r.announcement_id=? ORDER BY r.acked_at IS NOT NULL, r.seen_at IS NULL, u.display_name').all(a.workspace_id, a.id) as any[];
+    const map = (u: any) => ({ ...publicUser(ctx, u), department: u.ws_dept_name || u.department || null, seenAt: u.seen_at, ackedAt: u.acked_at, remindedAt: u.reminded_at });
     const pending = rows.filter(r => !r.acked_at).map(map), acknowledged = rows.filter(r => r.acked_at).map(map);
     return { announcement: serializeAnn(a, req.userId), pending, acknowledged, offShift: pending.filter(p => !p.onShift && !p.seenAt).length };
   });

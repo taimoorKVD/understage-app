@@ -200,6 +200,26 @@ export type MlsPublishResult = {
  * Phase 2 was asked not to do without reporting back first). KeyPackages are
  * still published; PUT /me/mls/credential can be called once that export exists.
  */
+function fileExists(path: string): boolean {
+  try {
+    const { File } = require('expo-file-system') as { File: new (uri: string) => { exists: boolean } };
+    return new File(path).exists;
+  } catch {
+    return false;
+  }
+}
+
+export function mlsIdentityStorePath(userId: string): string {
+  const root = mlsDocumentsDirectory().replace(/\/+$/, '');
+  return `${root}/mls/${userId}.sqlite`;
+}
+
+export function mlsGroupStorePath(userId: string, conversationId: string): string {
+  const root = mlsDocumentsDirectory().replace(/\/+$/, '');
+  const safe = conversationId.replace(/[^A-Za-z0-9_-]/g, '_');
+  return `${root}/mls/${userId}/g/${safe}.sqlite`;
+}
+
 export async function publishMlsKeyPackagesAfterKeygen(userId: string): Promise<MlsPublishResult> {
   if (!MLS_DIRECTORY_ENABLED) {
     return { uploaded: 0, skipped: true, reason: 'disabled' };
@@ -208,12 +228,13 @@ export async function publishMlsKeyPackagesAfterKeygen(userId: string): Promise<
     return { uploaded: 0, skipped: true, reason: 'native-unavailable' };
   }
   const root = mlsDocumentsDirectory().replace(/\/+$/, '');
-  const session = await mlsOpenSession(`${root}/mls/${userId}.sqlite`);
+  const sessionPath = `${root}/mls/${userId}.sqlite`;
+  const session = await mlsOpenSession(sessionPath);
   try {
-    try {
+    // generateCredential always mints a new signer. Only call it when no vault exists
+    // so a later publish cannot silently rotate the MLS identity.
+    if (!fileExists(`${sessionPath}.vault`)) {
       await mlsGenerateCredential(session, userId);
-    } catch {
-      // Session may already hold a credential from a previous publish.
     }
     const now = Date.now();
     const notBefore = now - 60 * 60 * 1000;

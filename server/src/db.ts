@@ -75,7 +75,9 @@ CREATE TABLE IF NOT EXISTS conversation_members (
 );
 CREATE TABLE IF NOT EXISTS messages (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  sender_id TEXT NOT NULL, client_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'e2ee', created_at INTEGER NOT NULL,
+  sender_id TEXT NOT NULL, client_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'e2ee',
+  protocol TEXT NOT NULL DEFAULT 'nacl',
+  created_at INTEGER NOT NULL,
   UNIQUE (sender_id, client_id)
 );
 -- one ciphertext per recipient (including sender's own copy). Server never sees plaintext.
@@ -190,6 +192,8 @@ export function migrateMls(db: DB) {
   if (!cols.has('mls_signature_key')) db.exec('ALTER TABLE users ADD COLUMN mls_signature_key TEXT');
   if (!cols.has('mls_credential_identity')) db.exec('ALTER TABLE users ADD COLUMN mls_credential_identity TEXT');
   if (!cols.has('mls_key_updated_at')) db.exec('ALTER TABLE users ADD COLUMN mls_key_updated_at INTEGER');
+  const msgCols = columnNames(db, 'messages');
+  if (!msgCols.has('protocol')) db.exec("ALTER TABLE messages ADD COLUMN protocol TEXT NOT NULL DEFAULT 'nacl'");
 }
 
 export function openDb(file = ':memory:'): DB {
