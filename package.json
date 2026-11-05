@@ -47,6 +47,7 @@
     "@types/react": "~19.3.0",
     "eslint": "^9.0.0",
     "eslint-config-expo": "~58.0.4",
+    "patch-package": "^8.0.1",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -57,7 +58,10 @@
     "export:ios": "expo export --platform ios",
     "server": "npm --prefix server run dev",
     "test": "npm --prefix server test",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "mac:setup": "bash scripts/mac-setup.sh",
+    "mac:launch": "bash scripts/mac-launch.sh",
+    "postinstall": "patch-package"
   },
   "private": true
 }

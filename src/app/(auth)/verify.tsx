@@ -22,6 +22,8 @@ export default function Verify() {
   const [err, setErr] = useState<string | null>(null);
   const [left, setLeft] = useState(0);
   const codeRef = useRef<React.ComponentRef<typeof TextInput>>(null);
+  // Guards against double submission (auto-submit on 6th digit + Verify tap, or OTP autofill firing twice).
+  const inFlight = useRef(false);
   useEffect(() => { if (left <= 0) return; const t = setTimeout(() => setLeft(left - 1), 1000); return () => clearTimeout(t); }, [left]);
 
   const destination = kind === 'phone' ? `${cc}${value.replace(/[^\d]/g, '').replace(/^0/, '')}` : value.trim();
@@ -36,6 +38,8 @@ export default function Verify() {
     } catch (e) { setErr(errMsg(e)); } finally { setBusy(false); }
   }
   async function verify(c: string) {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setBusy(true); setErr(null);
     try {
       const r = await api<{ accessToken: string; refreshToken: string; user: SelfUser; isNew: boolean }>('POST', '/auth/otp/verify', { kind, destination, code: c });
@@ -43,7 +47,7 @@ export default function Verify() {
       const id = useApp.getState().identity;
       if (r.user.profileComplete && id && id.publicKey === r.user.identityKey) await finishOnboarding();
       else useApp.setState({ status: 'onboarding' });
-    } catch (e) { setErr(errMsg(e)); setCode(''); } finally { setBusy(false); }
+    } catch (e) { setErr(errMsg(e)); setCode(''); } finally { inFlight.current = false; setBusy(false); }
   }
 
   return (
@@ -80,13 +84,13 @@ export default function Verify() {
               <TextInput ref={codeRef} testID="code" value={code} maxLength={6} keyboardType="number-pad" textContentType="oneTimeCode" autoComplete="one-time-code"
                 onChangeText={t => { const c = t.replace(/\D/g, ''); setCode(c); if (c.length === 6) verify(c); }} style={{ position: 'absolute', opacity: 0, height: 1, width: 1 }} />
               {left > 0 ? <T mu size={13}>Resend code in 0:{String(left).padStart(2, '0')}</T> : <Tap testID="resend" onPress={sendCode}><T gold size={13} weight="600">Resend code</T></Tap>}
-              {devCode ? <T size={12} mu testID="devcode">Development server — code: {devCode}</T> : null}
+              {__DEV__ && devCode ? <T size={12} mu testID="devcode">Development server — code: {devCode}</T> : null}
             </View>
           ) : null}
           <ErrorText>{err}</ErrorText>
           <View style={{ flex: 1 }} />
           {!sent ? <Button testID="sendcode" title="Send code" disabled={!valid} loading={busy} onPress={sendCode} />
-            : <Button testID="verify" title="Verify" disabled={code.length !== 6} loading={busy} onPress={() => verify(code)} />}
+            : <Button testID="verify" title="Verify" disabled={code.length !== 6 || busy} loading={busy} onPress={() => verify(code)} />}
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>

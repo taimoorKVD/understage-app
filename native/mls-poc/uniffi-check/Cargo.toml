@@ -1,0 +1,18 @@
+[package]
+name = "mls-poc-uniffi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Optional Phase 0 UniFFI Swift binding smoke test (not linked into the app)"
+
+[lib]
+name = "mls_poc_uniffi"
+path = "src/lib.rs"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi_bindgen.rs"
+
+[dependencies]
+uniffi = { version = "0.32.2", features = ["cli"] }

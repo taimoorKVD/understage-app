@@ -8,7 +8,7 @@ import { T, Header, Avatar, Row, Card, Button, Pill, Spinner, s } from '../../..
 import { Icon } from '../../../components/Icon';
 import { useApp } from '../../../store/app';
 import { api, errMsg } from '../../../lib/api';
-import { safetyNumber } from '../../../lib/crypto';
+import { conversationSafetyNumber } from '../../../lib/crypto';
 import { otherMember } from '../../../lib/format';
 import { fmtDate } from '../../../lib/time';
 import type { PublicUser } from '../../../lib/types';
@@ -21,7 +21,10 @@ export default function Safety() {
   useEffect(() => { if (other) api('GET', `/users/${other.id}`).then(setPeer).catch(e => toast(errMsg(e))); }, [other?.id]); // eslint-disable-line react-hooks/exhaustive-deps -- refetch only when the peer id changes
   if (!peer || !identity) return <SafeAreaView style={[s.screen, { alignItems: 'center', justifyContent: 'center' }]}><Spinner /></SafeAreaView>;
   const first = (peer.displayName || '').split(' ')[0];
-  const num = peer.identityKey ? safetyNumber({ id: me.id, publicKey: identity.publicKey }, { id: peer.id, publicKey: peer.identityKey }) : null;
+  const num = conversationSafetyNumber(
+    { id: me.id, publicKey: identity.publicKey, mlsSignaturePublicKey: me.mlsSignaturePublicKey },
+    { id: peer.id, publicKey: peer.identityKey ?? '', mlsSignaturePublicKey: peer.mlsSignaturePublicKey },
+  );
   const toggle = async () => {
     setBusy(true);
     try { if (!peer.isContact) await api('POST', '/contacts', { userId: peer.id }); await api('POST', `/contacts/${peer.id}/verify`, { verified: !peer.verified }); setPeer({ ...peer, isContact: true, verified: !peer.verified }); toast(peer.verified ? 'Verification removed' : `${first} is verified`); }

@@ -1,0 +1,32 @@
+[package]
+name = "understage-mls"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "OpenMLS 0.9.2 UniFFI crate for the Understage Expo module (Phase 1)"
+
+[lib]
+name = "understage_mls"
+path = "src/lib.rs"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi_bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+default = []
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+aes-gcm = "0.10"
+openmls = "=0.9.2"
+openmls_basic_credential = { version = "0.6.0", features = ["clonable"] }
+openmls_rust_crypto = "0.6.0"
+openmls_sqlite_storage = "0.3.0"
+openmls_traits = "0.6.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uniffi = "0.32.2"

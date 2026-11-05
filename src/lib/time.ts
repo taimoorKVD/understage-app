@@ -28,8 +28,35 @@ export function nextShiftLabel(shift: Shift, tz: string, at = Date.now()) {
   }
   return shift.start;
 }
+function gmtOffsetLabel(tz: string, at: number) {
+  try {
+    const d = new Date(at);
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    const p = Object.fromEntries(fmt.formatToParts(d).filter(x => x.type !== 'literal').map(x => [x.type, x.value]));
+    const asUTC = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour), Number(p.minute), Number(p.second));
+    const mins = Math.round((asUTC - d.getTime()) / 60_000);
+    const sign = mins >= 0 ? '+' : '-';
+    const abs = Math.abs(mins);
+    const hh = Math.floor(abs / 60);
+    const mm = abs % 60;
+    return mm ? `GMT${sign}${hh}:${String(mm).padStart(2, '0')}` : `GMT${sign}${hh}`;
+  } catch { return undefined; }
+}
 export function tzAbbr(tz: string, at = Date.now()) {
-  try { return new Intl.DateTimeFormat('en-GB', { timeZone: tz, timeZoneName: 'short' }).formatToParts(new Date(at)).find(p => p.type === 'timeZoneName')?.value || tz; } catch { return tz; }
+  try {
+    const name = (style: 'shortOffset' | 'short' | 'longOffset') =>
+      new Intl.DateTimeFormat('en-GB', { timeZone: tz, timeZoneName: style }).formatToParts(new Date(at)).find(p => p.type === 'timeZoneName')?.value;
+    // Hermes often reports IANA zones as bare "GMT" for short/shortOffset; prefer an explicit offset (e.g. GMT+5).
+    for (const style of ['shortOffset', 'longOffset', 'short'] as const) {
+      const value = name(style);
+      if (value && value !== 'GMT' && value !== 'UTC') return value;
+    }
+  } catch { /* fall through to a computed offset */ }
+  return gmtOffsetLabel(tz, at) || tz;
 }
 export const tzCity = (tz: string) => tz.split('/').pop()!.replace(/_/g, ' ');
 export function clock(at: number) { const d = new Date(at); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; }

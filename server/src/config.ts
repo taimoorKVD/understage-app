@@ -13,6 +13,8 @@ export interface Config {
   turnUrls: string[];
   turnUsername?: string;
   turnCredential?: string;
+  /** OpenMLS AS/DS directory. Default off so the nacl path stays live. */
+  mlsDirectoryEnabled: boolean;
 }
 
 export function loadConfig(over: Partial<Config> = {}): Config {
@@ -38,6 +40,7 @@ export function loadConfig(over: Partial<Config> = {}): Config {
     turnUrls: (env.TURN_URLS || '').split(',').filter(Boolean),
     turnUsername: env.TURN_USERNAME,
     turnCredential: env.TURN_CREDENTIAL,
+    mlsDirectoryEnabled: env.MLS_DIRECTORY_ENABLED === '1',
     ...over,
   };
 }

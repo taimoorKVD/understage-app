@@ -12,9 +12,10 @@ import { Icon } from '../../../components/Icon';
 import { Sheet } from '../../../components/Sheet';
 import { Bubble } from '../../../components/Bubble';
 import { useApp } from '../../../store/app';
-import { loadMessages, loadOlder, markRead, send, sendTyping, refreshConversation, openDirect } from '../../../lib/engine';
+import { loadMessages, loadOlder, markRead, send, sendTyping, refreshConversation, openDirect, dropConversation } from '../../../lib/engine';
 import { api, errMsg } from '../../../lib/api';
-import { convTitle, otherMember } from '../../../lib/format';
+import { convTitle, otherMember, preview } from '../../../lib/format';
+import type { LocalMessage } from '../../../lib/db';
 import { startCall, callsAvailable } from '../../../lib/calls';
 import type { PublicUser } from '../../../lib/types';
 
@@ -33,6 +34,8 @@ export default function Chat() {
   const typing = (typingRaw ?? []).filter(t => t.until > now && t.userId !== me.id);
   const toast = useApp(st => st.showToast);
   const [text, setText] = useState(''); const [attachOpen, setAttachOpen] = useState(false); const [infoOpen, setInfoOpen] = useState(false);
+  const [contactOpen, setContactOpen] = useState(false); const [contacts, setContacts] = useState<PublicUser[]>([]);
+  const [replyingTo, setReplyingTo] = useState<LocalMessage | null>(null);
   const [peer, setPeer] = useState<(PublicUser & { isContact: boolean; blocked: boolean; verified: boolean }) | null>(null);
   const [older, setOlder] = useState<'idle' | 'loading' | 'done'>('idle');
   const lastTyping = useRef(0);
@@ -66,7 +69,28 @@ export default function Chat() {
     send(id, { v: 1, type: 'voice', attachment: att0('audio/m4a', `voice-${Date.now()}.m4a`, size), durationSec: Math.round(secs), waveform: wf.map(x => Math.round(x * 100) / 100), sentAt: Date.now() }, { uri, mime: 'audio/m4a', name: 'voice.m4a', size });
   };
 
-  const sendText = () => { const t = text.trim(); if (!t) return; send(id, { v: 1, type: 'text', text: t, sentAt: Date.now() }); setText(''); };
+  const sendText = () => {
+    const t = text.trim(); if (!t) return;
+    const seen = new Set<string>();
+    const mentions = [...t.matchAll(/@([a-zA-Z0-9._]+)/g)].flatMap(m => {
+      const u = conv?.members.find(x => (x.username || '').toLowerCase() === m[1].toLowerCase());
+      if (!u || seen.has(u.id)) return [];
+      seen.add(u.id);
+      return [{ userId: u.id, username: u.username || m[1] }];
+    });
+    send(id, { v: 1, type: 'text', text: t, sentAt: Date.now(), replyTo: replyingTo?.id || replyingTo?.clientId || undefined, mentions: mentions.length ? mentions : undefined });
+    setText(''); setReplyingTo(null);
+  };
+  const pickContact = async () => {
+    setAttachOpen(false);
+    try {
+      const r = await api<{ contacts: PublicUser[] }>('GET', '/contacts');
+      setContacts(r.contacts); setContactOpen(true);
+    } catch (e) { toast(errMsg(e)); }
+  };
+  const insertMention = (u: PublicUser) => {
+    setText(t => t.replace(/(^|\s)@([a-zA-Z0-9._]*)$/, `$1@${u.username || ''} `));
+  };
   const pickImage = async (camera: boolean) => {
     setAttachOpen(false);
     const perm = camera ? await ImagePicker.requestCameraPermissionsAsync() : await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -120,9 +144,15 @@ export default function Chat() {
           onEndReached={async () => { if (older !== 'idle') return; setOlder('loading'); const n = await loadOlder(id).catch(() => 0); setOlder(n < 50 ? 'done' : 'idle'); }}
           ListHeaderComponent={typing.length && conv.kind === 'direct' ? <View testID="typing" style={{ alignSelf: 'flex-start', backgroundColor: C.recv, borderRadius: 16, paddingHorizontal: 14, paddingVertical: 10 }}><T mu>•••</T></View> : undefined}
           ListFooterComponent={<View style={{ alignSelf: 'center', backgroundColor: C.pill, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4, flexDirection: 'row', gap: 6, alignItems: 'center', marginBottom: 6 }}><Icon name="lock" size={12} color={C.gold} /><T size={12} gold>Messages and calls are end-to-end encrypted</T></View>}
-          renderItem={({ item }) => <Bubble m={item} mine={item.senderId === me.id} senderName={nameOf(item.senderId)} group={conv.kind !== 'direct'} />} />
+          renderItem={({ item }) => {
+            const rt = item.body?.type === 'text' ? item.body.replyTo : undefined;
+            const orig = rt ? (msgs ?? []).find(x => x.id === rt || x.clientId === rt) : undefined;
+            return <Bubble m={item} mine={item.senderId === me.id} senderName={nameOf(item.senderId)} group={conv.kind !== 'direct'} replyPreview={orig ? preview(orig.body) : undefined} onReply={() => setReplyingTo(item)} readByNames={(item.readByUserIds ?? []).map(uid => nameOf(uid).split(' ')[0]).filter(Boolean)} />;
+          }} />
         {conv.readonly ? (
           <Row style={{ justifyContent: 'center', padding: 14 }} testID="readonly"><Icon name="lock" size={14} color={C.muted} /><T mu size={13}>{conv.workspace?.wrapped ? 'Wrapped · read-only archive' : 'Only admins can post here'}</T></Row>
+        ) : conv.e2eeError === 'GROUP_TOO_LARGE_FOR_E2EE' ? (
+          <Row testID="e2ee-limited" style={{ justifyContent: 'center', padding: 14 }}><Icon name="lock" size={14} color={C.muted} /><T mu size={13}>This company chat is too large for end-to-end encryption (50 member limit). Use announcements instead.</T></Row>
         ) : rs.isRecording ? (
           <Row style={{ padding: 10, gap: 12 }}>
             <Tap testID="rec-cancel" onPress={() => stopRec(true)} style={{ padding: 6 }}><Icon name="x" size={22} color={C.muted} /></Tap>
@@ -131,23 +161,57 @@ export default function Chat() {
             <Tap testID="rec-send" accessibilityLabel="Send voice note" onPress={() => stopRec(false)} style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: C.gold, alignItems: 'center', justifyContent: 'center' }}><Icon name="send" size={20} color="#000" /></Tap>
           </Row>
         ) : (
-          <Row style={{ padding: 10, gap: 8, borderTopWidth: 1, borderTopColor: C.border }}>
-            <Tap testID="attach" accessibilityLabel="Attach" onPress={() => setAttachOpen(true)} style={{ padding: 4 }}><Icon name="clip" size={22} color={C.muted} /></Tap>
-            <View style={{ flex: 1, backgroundColor: C.input, borderRadius: 20, paddingHorizontal: 14, paddingVertical: Platform.OS === 'ios' ? 10 : 4 }}>
-              <TextInput testID="msg" value={text} onChangeText={t => { setText(t); if (Date.now() - lastTyping.current > 2500) { lastTyping.current = Date.now(); sendTyping(id); } }}
-                placeholder="Message" placeholderTextColor={C.muted} multiline style={{ color: C.text, fontSize: 15, maxHeight: 110 }} />
-            </View>
-            <Tap testID="sendbtn" accessibilityLabel={text.trim() ? 'Send' : 'Record voice note'} onPress={text.trim() ? sendText : startRec}
-              style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: C.gold, alignItems: 'center', justifyContent: 'center' }}>
-              <Icon name={text.trim() ? 'send' : 'mic'} size={21} color="#000" />
-            </Tap>
-          </Row>
+          <View>
+            {(() => {
+              const mentionMatch = conv.kind !== 'direct' ? text.match(/(^|\s)@([a-zA-Z0-9._]*)$/) : null;
+              const mentionQ = mentionMatch ? mentionMatch[2].toLowerCase() : null;
+              const mentionHits = mentionQ == null ? [] : conv.members.filter(m => m.id !== me.id && !!m.username && ((m.username || '').toLowerCase().startsWith(mentionQ) || (m.displayName || '').toLowerCase().includes(mentionQ))).slice(0, 6);
+              return mentionHits.length ? (
+                <View style={{ borderTopWidth: 1, borderTopColor: C.border, paddingHorizontal: 12, paddingVertical: 6, gap: 2 }}>
+                  {mentionHits.map(u => (
+                    <Tap key={u.id} onPress={() => insertMention(u)} style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 }}>
+                      <Avatar name={u.displayName || u.username || '?'} uri={u.avatar} size={28} />
+                      <View><T weight="600">{u.displayName}</T><T mu size={12}>@{u.username}</T></View>
+                    </Tap>
+                  ))}
+                </View>
+              ) : null;
+            })()}
+            {replyingTo ? (
+              <Row style={{ paddingHorizontal: 14, paddingTop: 8, gap: 8 }}>
+                <View style={{ width: 3, alignSelf: 'stretch', backgroundColor: C.gold, borderRadius: 2 }} />
+                <View style={{ flex: 1 }}>
+                  <T size={12} gold>Reply</T>
+                  <T mu size={13} numberOfLines={1}>{preview(replyingTo.body)}</T>
+                </View>
+                <Tap onPress={() => setReplyingTo(null)} style={{ padding: 4 }}><Icon name="x" size={16} color={C.muted} /></Tap>
+              </Row>
+            ) : null}
+            <Row style={{ padding: 10, gap: 8, borderTopWidth: 1, borderTopColor: C.border }}>
+              <Tap testID="attach" accessibilityLabel="Attach" onPress={() => setAttachOpen(true)} style={{ padding: 4 }}><Icon name="clip" size={22} color={C.muted} /></Tap>
+              <View style={{ flex: 1, backgroundColor: C.input, borderRadius: 20, paddingHorizontal: 14, paddingVertical: Platform.OS === 'ios' ? 10 : 4 }}>
+                <TextInput testID="msg" value={text} onChangeText={t => { setText(t); if (Date.now() - lastTyping.current > 2500) { lastTyping.current = Date.now(); sendTyping(id); } }}
+                  placeholder="Message" placeholderTextColor={C.muted} multiline style={{ color: C.text, fontSize: 15, maxHeight: 110 }} />
+              </View>
+              <Tap testID="sendbtn" accessibilityLabel={text.trim() ? 'Send' : 'Record voice note'} onPress={text.trim() ? sendText : startRec}
+                style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: C.gold, alignItems: 'center', justifyContent: 'center' }}>
+                <Icon name={text.trim() ? 'send' : 'mic'} size={21} color="#000" />
+              </Tap>
+            </Row>
+          </View>
         )}
       </KeyboardAvoidingView>
       <Sheet visible={attachOpen} onClose={() => setAttachOpen(false)} title="Share securely">
-        {([['img', 'Photo library', () => pickImage(false), 'a-photo'], ['cam', 'Camera', () => pickImage(true), 'a-cam'], ['doc', 'Document', pickDoc, 'a-doc']] as const).map(([ic, t, fn, tid]) => (
+        {([['img', 'Photo library', () => pickImage(false), 'a-photo'], ['cam', 'Camera', () => pickImage(true), 'a-cam'], ['doc', 'Document', pickDoc, 'a-doc'], ['users', 'Contact', pickContact, 'a-contact']] as const).map(([ic, t, fn, tid]) => (
           <Tap key={t} testID={tid} onPress={fn} style={{ flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 14 }}><Icon name={ic} size={22} color={C.gold} /><T size={16}>{t}</T></Tap>))}
         <T mu size={12}>Files are encrypted on this phone before upload (max 25 MB).</T>
+      </Sheet>
+      <Sheet visible={contactOpen} onClose={() => setContactOpen(false)} title="Share a contact">
+        {contacts.length ? contacts.map(c => (
+          <Tap key={c.id} onPress={() => { setContactOpen(false); send(id, { v: 1, type: 'contact', userId: c.id, displayName: c.displayName || c.username || 'Contact', username: c.username || '', sentAt: Date.now() }); }} style={{ paddingVertical: 8 }}>
+            <Row gap={12}><Avatar name={c.displayName || c.username || '?'} uri={c.avatar} size={36} /><View><T weight="600">{c.displayName}</T><T mu size={12}>{c.username ? `@${c.username}` : ''}</T></View></Row>
+          </Tap>
+        )) : <T mu size={13}>No contacts to share yet.</T>}
       </Sheet>
       <GroupInfo visible={infoOpen} onClose={() => setInfoOpen(false)} convId={conv.id} />
     </SafeAreaView>
@@ -177,7 +241,7 @@ function GroupInfo({ visible, onClose, convId }: { visible: boolean; onClose: ()
           </> : null}
         </Row>))}
       {conv.kind === 'group' && admin ? <Button testID="gadd" title="Add people" variant="secondary" onPress={() => { onClose(); router.push({ pathname: '/new-group', params: { addTo: convId } }); }} /> : null}
-      {conv.kind === 'group' ? <Button testID="gleave" title="Leave group" variant="danger" loading={adding} onPress={async () => { setAdding(true); try { await api('DELETE', `/conversations/${convId}/members/${me.id}`); onClose(); router.replace('/'); } catch (e) { toast(errMsg(e)); } finally { setAdding(false); } }} /> : null}
+      {conv.kind === 'group' ? <Button testID="gleave" title="Leave group" variant="danger" loading={adding} onPress={async () => { setAdding(true); try { await api('DELETE', `/conversations/${convId}/members/${me.id}`); dropConversation(convId); onClose(); router.replace('/'); } catch (e) { toast(errMsg(e)); } finally { setAdding(false); } }} /> : null}
     </Sheet>
   );
 }

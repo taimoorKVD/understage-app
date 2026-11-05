@@ -6,9 +6,13 @@ import { Platform } from 'react-native';
 import { router } from 'expo-router';
 import { api } from './api';
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: true }),
-});
+try {
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: true }),
+  });
+} catch {
+  // Simulator builds without push entitlements can throw here; push stays disabled.
+}
 
 /** Registers an Expo push token with the server. Needs a physical device + an EAS projectId (see README). */
 export async function registerPush(): Promise<{ ok: boolean; reason?: string }> {

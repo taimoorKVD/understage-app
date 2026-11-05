@@ -1,0 +1,9 @@
+{
+  "name": "understage-mls",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenMLS (RFC 9420) UniFFI Expo module for Understage Phase 1",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "license": "UNLICENSED"
+}

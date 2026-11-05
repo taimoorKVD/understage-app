@@ -9,7 +9,7 @@ import type { OutboxItem } from '../../shared/outbox';
 export type LocalStatus = 'pending' | 'sending' | 'failed' | 'sent' | 'delivered' | 'read';
 export interface LocalMessage {
   key: string; id: string | null; clientId: string; conversationId: string; seq: number | null; senderId: string; createdAt: number;
-  body: PlainMessage | null; status: LocalStatus; readBy: number; recipients: number; error?: string | null; stage?: 'encrypting' | 'uploading' | null;
+  body: PlainMessage | null; status: LocalStatus; readBy: number; recipients: number; readByUserIds?: string[]; error?: string | null; stage?: 'encrypting' | 'uploading' | null;
 }
 export interface OutboxPayload { plain: PlainMessage; file?: { uri: string; mime: string; name: string; size: number } }
 

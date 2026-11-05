@@ -19,7 +19,7 @@ export interface Recipient { id: string; publicKey: string }
 export interface Payload { recipientId: string; nonce: string; ciphertext: string }
 
 export type PlainMessage =
-  | { v: 1; type: 'text'; text: string; sentAt: number; replyTo?: string }
+  | { v: 1; type: 'text'; text: string; sentAt: number; replyTo?: string; mentions?: { userId: string; username: string }[] }
   | { v: 1; type: 'voice'; attachment: AttachmentRef; durationSec: number; waveform: number[]; sentAt: number }
   | { v: 1; type: 'image'; attachment: AttachmentRef; caption?: string; width?: number; height?: number; sentAt: number }
   | { v: 1; type: 'doc'; attachment: AttachmentRef; sentAt: number }
@@ -85,6 +85,43 @@ export function safetyNumber(a: { id: string; publicKey: string }, b: { id: stri
   const [x, y] = [a, b].sort((p, q) => (p.id < q.id ? -1 : 1));
   const digits = fingerprint(x.id, x.publicKey) + fingerprint(y.id, y.publicKey);
   return digits.match(/.{5}/g)!;
+}
+
+
+/** 60-digit safety number bound to MLS Ed25519 credentials (same 12-group UX). */
+export function mlsSafetyNumber(
+  a: { id: string; signaturePublicKey: string },
+  b: { id: string; signaturePublicKey: string },
+): string[] {
+  const [x, y] = [a, b].sort((p, q) => (p.id < q.id ? -1 : 1));
+  let h: Uint8Array = decodeUTF8('understage-mls-safety-v1:' + x.id + ':' + x.signaturePublicKey + ':' + y.id + ':' + y.signaturePublicKey);
+  h = nacl.hash(h);
+  let s = '';
+  for (let i = 0; i < 30; i += 5) {
+    const n = h[i] * 2 ** 32 + h[i + 1] * 2 ** 24 + h[i + 2] * 2 ** 16 + h[i + 3] * 2 ** 8 + h[i + 4];
+    s += String(n % 100000).padStart(5, '0');
+  }
+  const extra = nacl.hash(h);
+  for (let i = 0; i < 30; i += 5) {
+    const n = extra[i] * 2 ** 32 + extra[i + 1] * 2 ** 24 + extra[i + 2] * 2 ** 16 + extra[i + 3] * 2 ** 8 + extra[i + 4];
+    s += String(n % 100000).padStart(5, '0');
+  }
+  return s.match(/.{5}/g)!;
+}
+
+/** Prefer the MLS number when both sides have published credentials; otherwise the legacy TweetNaCl number. */
+export function conversationSafetyNumber(
+  a: { id: string; publicKey: string; mlsSignaturePublicKey?: string | null },
+  b: { id: string; publicKey: string; mlsSignaturePublicKey?: string | null },
+): string[] | null {
+  if (a.mlsSignaturePublicKey && b.mlsSignaturePublicKey) {
+    return mlsSafetyNumber(
+      { id: a.id, signaturePublicKey: a.mlsSignaturePublicKey },
+      { id: b.id, signaturePublicKey: b.mlsSignaturePublicKey },
+    );
+  }
+  if (a.publicKey && b.publicKey) return safetyNumber({ id: a.id, publicKey: a.publicKey }, { id: b.id, publicKey: b.publicKey });
+  return null;
 }
 
 export const base64 = { encode: b64, decode: unb64 };

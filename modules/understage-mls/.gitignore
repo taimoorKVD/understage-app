@@ -1,0 +1,7 @@
+# Rust build
+/rust/target/
+
+# Produced by scripts/build-rust.sh — not required in a clone
+/ios/MlsCore.xcframework/
+/ios/generated/*
+!/ios/generated/.gitkeep

@@ -1,5 +1,9 @@
 import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { registerRequestLogging } from './http-log.js';
 import cors from '@fastify/cors';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { z, ZodError } from 'zod';
 import { openDb, type DB } from './db.js';
 import { loadConfig, type Config } from './config.js';
@@ -7,6 +11,8 @@ import { HttpError, isOnShift, localParts, now, sha256, uid } from './util.js';
 import { genOtp, identifierHash, issueSession, rotateRefresh, validateDestination, verifyAccess } from './auth.js';
 import { signInvite, verifyInvite } from './invites.js';
 import { ConsoleOtpSender, MemoryPushSender, type OtpSender, type PushSender } from './providers.js';
+import { registerMlsRoutes } from './mls.js';
+import { iapVerificationReady, loadTrustedRootPems, planFromProductId, verifySignedTransaction } from './iap.js';
 
 export interface Emitter { toUser(userId: string, event: string, data: unknown): void; isOnline(userId: string): boolean }
 const nullEmitter: Emitter = { toUser() {}, isOnline() { return false; } };
@@ -23,6 +29,11 @@ export const PLANS = [
   { id: 'production', name: 'Production', description: 'Workspace up to 50 people', priceGBP: 49, period: 'month', seats: 50, productId: 'com.understage.production.monthly' },
   { id: 'company', name: 'Company', description: 'Up to 200 people + admin tools', priceGBP: 149, period: 'month', seats: 200, productId: 'com.understage.company.monthly' },
 ];
+export const E2EE_GROUP_LIMIT = 50;
+
+function escapeLike(s: string) {
+  return s.replace(/[\\%_]/g, ch => '\\' + ch);
+}
 
 // ---------- serializers
 export function publicUser(ctx: Ctx, u: any, viewerId?: string) {
@@ -30,6 +41,11 @@ export function publicUser(ctx: Ctx, u: any, viewerId?: string) {
   return {
     id: u.id, displayName: u.display_name, username: u.username, role: u.role, department: u.department,
     avatar: u.avatar ?? null, identityKey: u.identity_key ?? null, keyUpdatedAt: u.key_updated_at ?? null,
+    ...(ctx.cfg.mlsDirectoryEnabled ? {
+      mlsSignaturePublicKey: u.mls_signature_key ?? null,
+      mlsCredentialIdentity: u.mls_credential_identity ?? null,
+      mlsKeyUpdatedAt: u.mls_key_updated_at ?? null,
+    } : {}),
     timezone: u.timezone, localTime: lp.hhmm, onShift: isOnShift(u, ctx.clock()),
     shift: { start: u.shift_start, end: u.shift_end, days: JSON.parse(u.work_days) },
     ...(viewerId ? {} : {}),
@@ -43,14 +59,16 @@ function selfUser(ctx: Ctx, u: any) {
   };
 }
 
-export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
+export function buildApp(opts: Omit<Partial<Ctx>, 'cfg'> & { cfg?: Partial<Config> } = {}) {
   const cfg = loadConfig(opts.cfg);
   const ctx: Ctx = {
     db: opts.db || openDb(':memory:'), cfg, otp: opts.otp || new ConsoleOtpSender(), push: opts.push || new MemoryPushSender(),
     emit: opts.emit || nullEmitter, clock: opts.clock || now,
   };
   const { db } = ctx;
+  const rateBuckets = new Map<string, number[]>();
   const app: FastifyInstance = Fastify({ logger: false, bodyLimit: 40 * 1024 * 1024 });
+  registerRequestLogging(app);
   app.register(cors, { origin: true });
   app.decorateRequest('userId', '');
 
@@ -102,6 +120,43 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
     if (!w) throw new HttpError(404, 'WORKSPACE_NOT_FOUND');
     return w;
   };
+  const entitledPlan = (userId: string) => {
+    const u = getUser(userId);
+    const plan = PLANS.find(p => p.id === u.plan) || PLANS[0];
+    const status = u.plan_status as string | null;
+    const expired = status === 'expired' || status === 'cancelled' || (!!u.plan_renews_at && u.plan_renews_at < ctx.clock() && status === 'trial');
+    if (plan.id === 'free' || plan.seats <= 0 || expired) return { id: 'free' as const, seats: 0, status: expired ? 'expired' : status };
+    return { id: plan.id as 'production' | 'company' | 'free', seats: plan.seats, status };
+  };
+  const writeAudit = (actorId: string | null, action: string, targetType: string | null, targetId: string | null, meta: Record<string, unknown> = {}) => {
+    db.prepare('INSERT INTO audit_log (id, at, actor_id, action, target_type, target_id, meta) VALUES (?,?,?,?,?,?,?)')
+      .run(uid('al_'), ctx.clock(), actorId, action, targetType, targetId, JSON.stringify(meta));
+  };
+  const rateLimit = (userId: string, bucket: string, max: number, windowMs: number) => {
+    const now = ctx.clock();
+    const key = `${userId}:${bucket}`;
+    const arr = (rateBuckets.get(key) || []).filter(x => x > now - windowMs);
+    if (arr.length >= max) throw new HttpError(429, 'RATE_LIMITED', 'Too many requests. Please wait a moment and try again.');
+    arr.push(now);
+    rateBuckets.set(key, arr);
+  };
+  const canViewUser = (viewerId: string, targetId: string, inviteToken?: string) => {
+    if (viewerId === targetId) return true;
+    if (db.prepare('SELECT 1 FROM contacts WHERE (owner_id=? AND contact_id=?) OR (owner_id=? AND contact_id=?)').get(viewerId, targetId, targetId, viewerId)) return true;
+    if (db.prepare('SELECT 1 FROM conversation_members a JOIN conversation_members b ON a.conversation_id=b.conversation_id WHERE a.user_id=? AND b.user_id=?').get(viewerId, targetId)) return true;
+    if (db.prepare('SELECT 1 FROM workspace_members a JOIN workspace_members b ON a.workspace_id=b.workspace_id WHERE a.user_id=? AND b.user_id=?').get(viewerId, targetId)) return true;
+    if (inviteToken) {
+      try {
+        const payload = verifyInvite(cfg, inviteToken, ctx.clock());
+        const inv = db.prepare('SELECT * FROM invites WHERE id=?').get(payload.id) as any;
+        if (inv && !inv.revoked) {
+          if (inv.user_id === targetId) return true;
+          if (inv.kind === 'workspace' && inv.workspace_id && db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(inv.workspace_id, targetId)) return true;
+        }
+      } catch { /* invalid invite does not grant visibility */ }
+    }
+    return false;
+  };
   const notWrapped = (w: any) => { if (w.wrapped_at) throw new HttpError(409, 'WORKSPACE_WRAPPED', 'This production has wrapped and is read-only'); };
   const convMembers = (convId: string) => (db.prepare('SELECT user_id FROM conversation_members WHERE conversation_id=?').all(convId) as any[]).map(r => r.user_id as string);
 
@@ -124,18 +179,20 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
     const p = db.prepare('SELECT nonce, ciphertext FROM message_payloads WHERE message_id=? AND recipient_id=?').get(m.id, viewerId) as any;
     let status: string | undefined, readBy = 0, deliveredTo = 0, recipients = 0;
     if (m.sender_id === viewerId) {
-      const rs = db.prepare('SELECT delivered_at, read_at FROM receipts WHERE message_id=? AND user_id != ?').all(m.id, viewerId) as any[];
+      const rs = db.prepare('SELECT user_id, delivered_at, read_at FROM receipts WHERE message_id=? AND user_id != ?').all(m.id, viewerId) as any[];
       recipients = rs.length; readBy = rs.filter(r => r.read_at).length; deliveredTo = rs.filter(r => r.delivered_at).length;
       status = recipients && readBy === recipients ? 'read' : recipients && deliveredTo === recipients ? 'delivered' : 'sent';
+      (m as any)._readByUserIds = rs.filter(r => r.read_at).map(r => r.user_id as string);
     }
     return {
       id: m.id, seq: m.seq, conversationId: m.conversation_id, senderId: m.sender_id, clientId: m.client_id, kind: m.kind,
       createdAt: m.created_at, nonce: p?.nonce ?? null, ciphertext: p?.ciphertext ?? null, status, readBy, deliveredTo, recipients,
+      readByUserIds: m.sender_id === viewerId ? ((m as any)._readByUserIds as string[] | undefined) : undefined,
     };
   };
 
   const serializeConv = (c: any, viewerId: string) => {
-    const members = db.prepare(`SELECT u.*, cm.role AS cm_role FROM conversation_members cm JOIN users u ON u.id=cm.user_id WHERE cm.conversation_id=? LIMIT 50`).all(c.id) as any[];
+    const members = db.prepare(`SELECT u.*, cm.role AS cm_role FROM conversation_members cm JOIN users u ON u.id=cm.user_id WHERE cm.conversation_id=?`).all(c.id) as any[];
     const memberCount = (db.prepare('SELECT COUNT(*) n FROM conversation_members WHERE conversation_id=?').get(c.id) as any).n;
     const me = db.prepare('SELECT * FROM conversation_members WHERE conversation_id=? AND user_id=?').get(c.id, viewerId) as any;
     const last = db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY seq DESC LIMIT 1').get(c.id) as any;
@@ -149,11 +206,26 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
       lastMessage: last ? serializeMessage(last, viewerId) : null,
       workspace: ws ? { id: ws.id, name: ws.name, initial: ws.initial, wrapped: !!ws.wrapped_at } : null,
       lastAnnouncement: lastAnn ? { title: lastAnn.title, createdAt: lastAnn.created_at } : null,
+      e2eeError: memberCount > E2EE_GROUP_LIMIT ? 'GROUP_TOO_LARGE_FOR_E2EE' : null,
     };
   };
 
   // ---------- health
-  app.get('/health', async () => ({ ok: true, time: ctx.clock() }));
+  app.get('/health', async () => ({ ok: true, time: ctx.clock(), mlsDirectory: !!ctx.cfg.mlsDirectoryEnabled }));
+
+  // ---------- web admin (plain HTML/JS; no @fastify/static)
+  const adminDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '../admin');
+  const serveAdmin = (file: string, type: string) => async (_req: FastifyRequest, reply: FastifyReply) => {
+    try {
+      const body = readFileSync(path.join(adminDir, file), 'utf8');
+      return reply.type(type).header('cache-control', 'no-store').send(body);
+    } catch {
+      throw new HttpError(404, 'NOT_FOUND', 'Admin UI file missing');
+    }
+  };
+  app.get('/admin', serveAdmin('index.html', 'text/html; charset=utf-8'));
+  app.get('/admin/', serveAdmin('index.html', 'text/html; charset=utf-8'));
+  app.get('/admin/app.js', serveAdmin('app.js', 'text/javascript; charset=utf-8'));
 
   // ---------- auth
   app.post('/auth/otp/request', async req => {
@@ -163,6 +235,8 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
     const recent = (db.prepare('SELECT COUNT(*) n FROM otps WHERE identifier_hash=? AND created_at>?').get(ih, ctx.clock() - 10 * 60_000) as any).n;
     if (recent >= 5) throw new HttpError(429, 'RATE_LIMITED', 'Too many codes requested. Try again in 10 minutes.');
     const code = genOtp();
+    // Resend invalidates any earlier unused codes so only the newest one works.
+    db.prepare('UPDATE otps SET used=1 WHERE identifier_hash=? AND used=0').run(ih);
     db.prepare('INSERT INTO otps (identifier_hash,code_hash,expires_at,created_at) VALUES (?,?,?,?)').run(ih, sha256(ih + code), ctx.clock() + cfg.otpTtlSec * 1000, ctx.clock());
     await ctx.otp.send(b.kind, dest, code);
     return { ok: true, expiresInSec: cfg.otpTtlSec, ...(cfg.devReturnOtp ? { devCode: code } : {}) };
@@ -173,7 +247,8 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
     const dest = validateDestination(b.kind, b.destination);
     const ih = identifierHash(cfg, b.kind, dest);
     const o = db.prepare('SELECT * FROM otps WHERE identifier_hash=? AND used=0 ORDER BY id DESC LIMIT 1').get(ih) as any;
-    if (!o || o.expires_at < ctx.clock()) throw new HttpError(400, 'CODE_EXPIRED', 'That code has expired. Request a new one.');
+    if (!o) throw new HttpError(400, 'CODE_NOT_FOUND', 'No active code for this number. Request a new one.');
+    if (o.expires_at < ctx.clock()) throw new HttpError(400, 'CODE_EXPIRED', 'That code has expired. Request a new one.');
     if (o.attempts >= 5) throw new HttpError(429, 'TOO_MANY_ATTEMPTS', 'Too many attempts. Request a new code.');
     if (o.code_hash !== sha256(ih + b.code)) {
       db.prepare('UPDATE otps SET attempts=attempts+1 WHERE id=?').run(o.id);
@@ -256,6 +331,7 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
   });
 
   app.get('/users/search', { preHandler: auth }, async req => {
+    rateLimit(req.userId, 'search', 30, 60_000);
     const q = z.object({ q: z.string() }).parse(req.query).q.trim().toLowerCase().replace(/^@/, '');
     if (q.length < 2) return { results: [] };
     const like = q.replace(/[%_]/g, '') + '%';
@@ -268,7 +344,9 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
 
   app.get('/users/:id', { preHandler: auth }, async req => {
     const { id } = req.params as { id: string };
+    const q = z.object({ inviteToken: z.string().optional(), invite: z.string().optional() }).parse(req.query);
     const u = getUser(id);
+    if (!canViewUser(req.userId, id, q.inviteToken || q.invite)) throw new HttpError(404, 'USER_NOT_FOUND');
     const c = db.prepare('SELECT verified FROM contacts WHERE owner_id=? AND contact_id=?').get(req.userId, id) as any;
     return { ...publicUser(ctx, u), isContact: !!c, verified: !!c?.verified, blocked: !!db.prepare('SELECT 1 FROM blocks WHERE owner_id=? AND blocked_id=?').get(req.userId, id) };
   });
@@ -314,13 +392,28 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
   });
 
   // ---------- invites (QR)
+  const mintInvite = (userId: string, kind: 'contact' | 'workspace', workspaceId: string | undefined, ttlSec: number) => {
+    if (kind === 'workspace') { if (!workspaceId) throw new HttpError(400, 'VALIDATION'); wsAdmin(workspaceId, userId); notWrapped(getWs(workspaceId)); }
+    const id = uid('i_'), exp = ctx.clock() + ttlSec * 1000;
+    db.prepare('INSERT INTO invites (id,kind,user_id,workspace_id,expires_at,created_at) VALUES (?,?,?,?,?,?)').run(id, kind, userId, workspaceId || null, exp, ctx.clock());
+    const token = signInvite(cfg, { id, k: kind, exp });
+    return { id, token, url: `understage://invite/${token}`, expiresAt: exp };
+  };
   app.post('/invites', { preHandler: auth }, async req => {
+    rateLimit(req.userId, 'invites', 15, 60_000);
     const b = z.object({ kind: z.enum(['contact', 'workspace']).default('contact'), workspaceId: z.string().optional(), ttlSec: z.number().int().min(60).max(30 * 86400).default(7 * 86400) }).parse(req.body || {});
-    if (b.kind === 'workspace') { if (!b.workspaceId) throw new HttpError(400, 'VALIDATION'); wsAdmin(b.workspaceId, req.userId); notWrapped(getWs(b.workspaceId)); }
-    const id = uid('i_'), exp = ctx.clock() + b.ttlSec * 1000;
-    db.prepare('INSERT INTO invites (id,kind,user_id,workspace_id,expires_at,created_at) VALUES (?,?,?,?,?,?)').run(id, b.kind, req.userId, b.workspaceId || null, exp, ctx.clock());
-    const token = signInvite(cfg, { id, k: b.kind, exp });
-    return { token, url: `understage://invite/${token}`, expiresAt: exp };
+    return mintInvite(req.userId, b.kind, b.workspaceId, b.ttlSec);
+  });
+  app.post('/invites/regenerate', { preHandler: auth }, async req => {
+    rateLimit(req.userId, 'invites', 15, 60_000);
+    const b = z.object({ kind: z.enum(['contact', 'workspace']).default('contact'), workspaceId: z.string().optional(), ttlSec: z.number().int().min(60).max(30 * 86400).default(7 * 86400) }).parse(req.body || {});
+    if (b.kind === 'workspace') {
+      if (!b.workspaceId) throw new HttpError(400, 'VALIDATION');
+      db.prepare('UPDATE invites SET revoked=1 WHERE user_id=? AND kind=? AND workspace_id=? AND revoked=0').run(req.userId, 'workspace', b.workspaceId);
+    } else {
+      db.prepare('UPDATE invites SET revoked=1 WHERE user_id=? AND kind=? AND revoked=0').run(req.userId, 'contact');
+    }
+    return mintInvite(req.userId, b.kind, b.workspaceId, b.ttlSec);
   });
   const resolveInvite = (token: string) => {
     const p = verifyInvite(cfg, token, ctx.clock());
@@ -338,12 +431,18 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
   app.post('/invites/accept', { preHandler: auth }, async req => {
     const b = z.object({ token: z.string() }).parse(req.body);
     const inv = resolveInvite(b.token);
-    if (inv.kind === 'contact') return { kind: 'contact', contact: addContact(req.userId, inv.user_id) };
+    if (inv.kind === 'contact') {
+      const alreadyContact = !!db.prepare('SELECT 1 FROM contacts WHERE owner_id=? AND contact_id=?').get(req.userId, inv.user_id);
+      return { kind: 'contact', contact: addContact(req.userId, inv.user_id), alreadyContact };
+    }
     const ws = getWs(inv.workspace_id); notWrapped(ws);
+    if (db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(ws.id, req.userId)) {
+      return { kind: 'workspace', workspaceId: ws.id, alreadyMember: true };
+    }
     const count = (db.prepare('SELECT COUNT(*) n FROM workspace_members WHERE workspace_id=?').get(ws.id) as any).n;
-    if (count >= ws.seat_limit && !db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(ws.id, req.userId)) throw new HttpError(409, 'WORKSPACE_FULL', 'This workspace has no seats left');
+    if (count >= ws.seat_limit) throw new HttpError(409, 'WORKSPACE_FULL', 'This workspace has no seats left');
     joinWorkspace(ws.id, req.userId, 'member', null);
-    return { kind: 'workspace', workspaceId: ws.id };
+    return { kind: 'workspace', workspaceId: ws.id, alreadyMember: false };
   });
 
   // ---------- blocks & reports
@@ -351,6 +450,7 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
   app.post('/blocks/:id', { preHandler: auth }, async req => { const id = (req.params as any).id; getUser(id); db.prepare('INSERT OR IGNORE INTO blocks VALUES (?,?,?)').run(req.userId, id, ctx.clock()); return { ok: true }; });
   app.delete('/blocks/:id', { preHandler: auth }, async req => { db.prepare('DELETE FROM blocks WHERE owner_id=? AND blocked_id=?').run(req.userId, (req.params as any).id); return { ok: true }; });
   app.post('/reports', { preHandler: auth }, async req => {
+    rateLimit(req.userId, 'reports', 8, 60_000);
     const b = z.object({ reportedId: z.string(), reason: z.enum(['harassment', 'spam', 'impersonation', 'other']), evidence: z.array(z.object({ text: z.string().max(4000), at: z.number() })).max(50).default([]), alsoBlock: z.boolean().default(false), note: z.string().max(2000).optional() }).parse(req.body);
     getUser(b.reportedId);
     const number = 2000 + ((db.prepare('SELECT COUNT(*) n FROM reports').get() as any).n as number) + 1;
@@ -389,6 +489,8 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
       return { conversation: serializeConv(db.prepare('SELECT * FROM conversations WHERE id=?').get(id), req.userId) };
     }
     for (const m of b.memberIds) getUser(m);
+    const unique = [...new Set([req.userId, ...b.memberIds])];
+    if (unique.length > E2EE_GROUP_LIMIT) throw new HttpError(409, 'GROUP_TOO_LARGE_FOR_E2EE', `Encrypted groups are limited to ${E2EE_GROUP_LIMIT} members`);
     const id = createConv('group', req.userId, b.memberIds, b.title);
     for (const m of b.memberIds) ctx.emit.toUser(m, 'conversation:updated', { conversationId: id });
     return { conversation: serializeConv(db.prepare('SELECT * FROM conversations WHERE id=?').get(id), req.userId) };
@@ -410,14 +512,18 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
     const c = db.prepare('SELECT kind FROM conversations WHERE id=?').get(id) as any;
     if (c.kind !== 'group') throw new HttpError(400, 'NOT_A_GROUP');
     const b = z.object({ userIds: z.array(z.string()).min(1) }).parse(req.body);
+    const already = new Set((db.prepare('SELECT user_id FROM conversation_members WHERE conversation_id=?').all(id) as any[]).map(r => r.user_id as string));
+    const adding = [...new Set(b.userIds)].filter(u => !already.has(u));
+    if (already.size + adding.length > E2EE_GROUP_LIMIT) throw new HttpError(409, 'GROUP_TOO_LARGE_FOR_E2EE', `Encrypted groups are limited to ${E2EE_GROUP_LIMIT} members`);
     for (const u of b.userIds) { getUser(u); db.prepare('INSERT OR IGNORE INTO conversation_members (conversation_id,user_id,role,joined_at) VALUES (?,?,?,?)').run(id, u, 'member', ctx.clock()); }
     for (const m of convMembers(id)) ctx.emit.toUser(m, 'conversation:updated', { conversationId: id });
-    return { ok: true };
+    return { ok: true, conversation: serializeConv(db.prepare('SELECT * FROM conversations WHERE id=?').get(id), req.userId) };
   });
   app.patch('/conversations/:id/members/:uid', { preHandler: auth }, async req => {
     const { id, uid: target } = req.params as any; convAdmin(id, req.userId); memberOf(id, target);
     const b = z.object({ role: z.enum(['admin', 'member']) }).parse(req.body);
     db.prepare('UPDATE conversation_members SET role=? WHERE conversation_id=? AND user_id=?').run(b.role, id, target);
+    writeAudit(req.userId, 'conversation.role_change', 'conversation_member', target, { conversationId: id, role: b.role });
     return { ok: true };
   });
   app.delete('/conversations/:id/members/:uid', { preHandler: auth }, async req => {
@@ -440,6 +546,7 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
 
   app.post('/conversations/:id/messages', { preHandler: auth }, async req => {
     const id = (req.params as any).id; memberOf(id, req.userId);
+    rateLimit(req.userId, 'messages', 40, 60_000);
     const conv = db.prepare('SELECT * FROM conversations WHERE id=?').get(id) as any;
     if (conv.readonly) throw new HttpError(409, 'READ_ONLY', 'This chat is read-only');
     if (conv.workspace_id) notWrapped(getWs(conv.workspace_id));
@@ -450,6 +557,9 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
     const existing = db.prepare('SELECT * FROM messages WHERE sender_id=? AND client_id=?').get(req.userId, b.clientId) as any;
     if (existing) return { message: serializeMessage(existing, req.userId), duplicate: true }; // idempotent outbox retry
     const members = convMembers(id);
+    if (conv.kind !== 'direct' && members.length > E2EE_GROUP_LIMIT) {
+      throw new HttpError(409, 'GROUP_TOO_LARGE_FOR_E2EE', `This conversation has ${members.length} members, which exceeds the ${E2EE_GROUP_LIMIT}-person limit for end-to-end encrypted chat.`);
+    }
     if (conv.kind === 'direct') { const other = members.find(m => m !== req.userId)!; if (isBlocked(req.userId, other)) throw new HttpError(403, 'BLOCKED', 'You can’t message this person'); }
     const given = new Set(b.payloads.map(p => p.recipientId));
     const missing = members.filter(m => !given.has(m));
@@ -503,6 +613,7 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
 
   // ---------- attachments (client-side encrypted blobs)
   app.post('/attachments', { preHandler: auth }, async req => {
+    rateLimit(req.userId, 'attachments', 20, 60_000);
     const b = z.object({ conversationId: z.string(), data: z.string().min(1) }).parse(req.body);
     memberOf(b.conversationId, req.userId);
     const buf = Buffer.from(b.data, 'base64');
@@ -535,9 +646,12 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
   };
   app.get('/workspaces', { preHandler: auth }, async req => ({ workspaces: (db.prepare('SELECT w.* FROM workspaces w JOIN workspace_members m ON m.workspace_id=w.id WHERE m.user_id=?').all(req.userId) as any[]).map(w => serializeWs(w, req.userId)) }));
   app.post('/workspaces', { preHandler: auth }, async req => {
-    const b = z.object({ name: z.string().trim().min(2).max(80), venue: z.string().max(80).default(''), runLabel: z.string().max(80).default(''), departments: z.array(z.string().min(1).max(40)).max(30).default([]), seatLimit: z.number().int().min(2).max(1000).default(200) }).parse(req.body);
+    const b = z.object({ name: z.string().trim().min(2).max(80), venue: z.string().max(80).default(''), runLabel: z.string().max(80).default(''), departments: z.array(z.string().min(1).max(40)).max(30).default([]), seatLimit: z.number().int().min(2).max(200).optional() }).parse(req.body);
+    const entitled = entitledPlan(req.userId);
+    if (entitled.seats <= 0) throw new HttpError(403, 'PLAN_REQUIRED', 'Upgrade to Production or Company to create a workspace');
+    const seatLimit = Math.min(b.seatLimit ?? entitled.seats, entitled.seats);
     const id = uid('w_');
-    db.prepare('INSERT INTO workspaces (id,name,initial,venue,run_label,seat_limit,created_by,created_at) VALUES (?,?,?,?,?,?,?,?)').run(id, b.name, b.name[0].toUpperCase(), b.venue, b.runLabel, b.seatLimit, req.userId, ctx.clock());
+    db.prepare('INSERT INTO workspaces (id,name,initial,venue,run_label,seat_limit,plan,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run(id, b.name, b.name[0].toUpperCase(), b.venue, b.runLabel, seatLimit, entitled.id, req.userId, ctx.clock());
     b.departments.forEach((d, i) => db.prepare('INSERT INTO departments VALUES (?,?,?,?)').run(uid('d_'), id, d, i));
     const convId = uid('c_');
     db.prepare("INSERT INTO conversations (id,kind,title,workspace_id,created_by,created_at) VALUES (?,'workspace',?,?,?,?)").run(convId, b.name, id, req.userId, ctx.clock());
@@ -551,7 +665,7 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
     let sql = 'SELECT u.*, m.role AS ws_role, m.department_id, m.city, d.name AS dept_name FROM workspace_members m JOIN users u ON u.id=m.user_id LEFT JOIN departments d ON d.id=m.department_id WHERE m.workspace_id=?';
     const args: any[] = [id];
     if (q.departmentId) { sql += ' AND m.department_id=?'; args.push(q.departmentId); }
-    if (q.q) { sql += ' AND (lower(u.display_name) LIKE ? OR u.username LIKE ?)'; args.push(`%${q.q.toLowerCase()}%`, `%${q.q.toLowerCase()}%`); }
+    if (q.q) { const like = `%${escapeLike(q.q.toLowerCase())}%`; sql += " AND (lower(u.display_name) LIKE ? ESCAPE '\\' OR lower(u.username) LIKE ? ESCAPE '\\')"; args.push(like, like); }
     const total = (db.prepare(sql.replace(/^SELECT .* FROM workspace_members/, 'SELECT COUNT(*) n FROM workspace_members')).get(...args) as any).n;
     sql += " ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, u.display_name LIMIT ? OFFSET ?"; args.push(q.limit, q.offset);
     const rows = db.prepare(sql).all(...args) as any[];
@@ -560,7 +674,10 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
   app.patch('/workspaces/:id/members/:uid', { preHandler: auth }, async req => {
     const { id, uid: target } = req.params as any; wsAdmin(id, req.userId); wsMember(id, target);
     const b = z.object({ role: z.enum(['admin', 'member']).optional(), departmentId: z.string().nullable().optional() }).parse(req.body);
-    if (b.role) db.prepare("UPDATE workspace_members SET role=? WHERE workspace_id=? AND user_id=? AND role!='owner'").run(b.role, id, target);
+    if (b.role) {
+      db.prepare("UPDATE workspace_members SET role=? WHERE workspace_id=? AND user_id=? AND role!='owner'").run(b.role, id, target);
+      writeAudit(req.userId, 'workspace.role_change', 'workspace_member', target, { workspaceId: id, role: b.role });
+    }
     if (b.departmentId !== undefined) db.prepare('UPDATE workspace_members SET department_id=? WHERE workspace_id=? AND user_id=?').run(b.departmentId, id, target);
     return { ok: true };
   });
@@ -644,6 +761,7 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
     db.prepare('UPDATE workspaces SET wrapped_at=?, delete_after=? WHERE id=?').run(t, t + 30 * DAY, id);
     db.prepare('UPDATE conversations SET readonly=1 WHERE workspace_id=?').run(id);
     db.prepare('UPDATE invites SET revoked=1 WHERE workspace_id=?').run(id);
+    writeAudit(req.userId, 'workspace.wrap', 'workspace', id, { name: ws.name });
     for (const m of db.prepare('SELECT user_id FROM workspace_members WHERE workspace_id=?').all(id) as any[]) ctx.emit.toUser(m.user_id, 'workspace:wrapped', { workspaceId: id });
     return { workspace: serializeWs(getWs(id), req.userId) };
   });
@@ -688,13 +806,42 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
     return { plan, status: u.plan_status, renewsAt: u.plan_renews_at, seatsUsed: seats, seatLimit: plan.seats };
   });
   app.post('/subscriptions/verify', { preHandler: auth }, async req => {
-    const b = z.object({ planId: z.enum(['production', 'company']), transactionId: z.string(), platform: z.enum(['ios', 'android']).default('ios'), dev: z.boolean().optional() }).parse(req.body);
-    if (!(b.dev && process.env.SUBSCRIPTIONS_DEV === '1')) {
-      throw new HttpError(501, 'IAP_NOT_CONFIGURED', 'Receipt validation needs App Store Server API credentials (APPSTORE_ISSUER_ID/KEY_ID/PRIVATE_KEY). See README.');
+    const b = z.object({
+      planId: z.enum(['production', 'company']).optional(),
+      transactionId: z.string().optional(),
+      signedTransaction: z.string().optional(),
+      platform: z.enum(['ios', 'android']).default('ios'),
+      dev: z.boolean().optional(),
+    }).parse(req.body);
+    // Never grant from `dev: true` / SUBSCRIPTIONS_DEV — entitlements require a verified JWS.
+    const roots = loadTrustedRootPems();
+    if (!iapVerificationReady(roots)) {
+      throw new HttpError(501, 'IAP_NOT_CONFIGURED', 'Subscription verification is disabled until Apple root CA certificates are configured (APPLE_ROOT_CA_PEM or APPLE_IAP_ROOTS_DIR). App Store Connect API keys are not required. See docs/PUSH_AND_IAP_REQUIREMENTS.md.');
     }
-    const renews = ctx.clock() + 14 * DAY;
-    db.prepare("UPDATE users SET plan=?, plan_status='trial', plan_renews_at=? WHERE id=?").run(b.planId, renews, req.userId);
-    return { ok: true, planId: b.planId, status: 'trial', renewsAt: renews };
+    if (!b.signedTransaction) {
+      throw new HttpError(400, 'IAP_UNVERIFIED', 'A signed App Store transaction JWS is required');
+    }
+    const verified = verifySignedTransaction(b.signedTransaction, {
+      roots,
+      now: ctx.clock(),
+      expectedBundleId: process.env.APPLE_BUNDLE_ID || 'com.kvmac.understage',
+    });
+    if (!verified.ok) {
+      throw new HttpError(400, 'IAP_UNVERIFIED', verified.error);
+    }
+    const planId = planFromProductId(verified.transaction.productId);
+    if (!planId) throw new HttpError(400, 'IAP_UNVERIFIED', 'Unknown productId');
+    if (b.planId && b.planId !== planId) throw new HttpError(400, 'IAP_UNVERIFIED', 'planId does not match the signed transaction');
+    if (b.transactionId && b.transactionId !== verified.transaction.transactionId) {
+      throw new HttpError(400, 'IAP_UNVERIFIED', 'transactionId does not match the signed transaction');
+    }
+    const exp = verified.transaction.expiresDate;
+    if (typeof exp === 'number' && exp <= ctx.clock()) {
+      throw new HttpError(400, 'IAP_EXPIRED', 'Signed transaction is expired');
+    }
+    const renews = typeof exp === 'number' ? exp : ctx.clock() + 14 * DAY;
+    db.prepare("UPDATE users SET plan=?, plan_status='active', plan_renews_at=? WHERE id=?").run(planId, renews, req.userId);
+    return { ok: true, planId, status: 'active', renewsAt: renews, environment: verified.transaction.environment || null };
   });
 
   // ---------- support tickets (user side)
@@ -729,6 +876,7 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
     const b = z.object({ status: z.enum(['open', 'reviewing', 'actioned', 'dismissed']) }).parse(req.body);
     const r = db.prepare('UPDATE reports SET status=? WHERE id=?').run(b.status, (req.params as any).id);
     if (!r.changes) throw new HttpError(404, 'NOT_FOUND');
+    writeAudit(req.userId, 'admin.report_status', 'report', (req.params as any).id, { status: b.status });
     return { ok: true };
   });
   app.post('/admin/suspensions', { preHandler: adminAuth }, async req => {
@@ -739,19 +887,21 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
     db.prepare('INSERT INTO suspensions (id,user_id,duration,reason,until,created_by,created_at) VALUES (?,?,?,?,?,?,?)').run(id, b.userId, b.duration, b.reason, until, req.userId, ctx.clock());
     db.prepare('UPDATE users SET suspended_until=?, suspension_reason=? WHERE id=?').run(until, b.reason, b.userId);
     db.prepare('UPDATE sessions SET revoked=1 WHERE user_id=?').run(b.userId);
+    writeAudit(req.userId, 'admin.suspend', 'user', b.userId, { duration: b.duration, reason: b.reason, until });
     return { id, until };
   });
-  app.get('/admin/suspensions', { preHandler: adminAuth }, async () => ({ suspensions: db.prepare('SELECT s.*, u.username FROM suspensions s JOIN users u ON u.id=s.user_id ORDER BY s.created_at DESC').all() }));
+  app.get('/admin/suspensions', { preHandler: adminAuth }, async () => ({ suspensions: db.prepare('SELECT s.*, u.username, u.display_name FROM suspensions s JOIN users u ON u.id=s.user_id ORDER BY s.created_at DESC').all() }));
   app.delete('/admin/suspensions/:id', { preHandler: adminAuth }, async req => {
     const s = db.prepare('SELECT * FROM suspensions WHERE id=?').get((req.params as any).id) as any;
     if (!s) throw new HttpError(404, 'NOT_FOUND');
     db.prepare('UPDATE suspensions SET lifted=1 WHERE id=?').run(s.id);
     db.prepare('UPDATE users SET suspended_until=NULL, suspension_reason=NULL WHERE id=?').run(s.user_id);
+    writeAudit(req.userId, 'admin.unsuspend', 'user', s.user_id, { suspensionId: s.id });
     return { ok: true };
   });
   app.get('/admin/tickets', { preHandler: adminAuth }, async () => ({ tickets: db.prepare('SELECT t.*, u.username, (SELECT COUNT(*) FROM ticket_messages m WHERE m.ticket_id=t.id) AS messages FROM tickets t JOIN users u ON u.id=t.user_id ORDER BY t.created_at DESC').all() }));
   app.get('/admin/tickets/:id', { preHandler: adminAuth }, async req => {
-    const t = db.prepare('SELECT * FROM tickets WHERE id=?').get((req.params as any).id);
+    const t = db.prepare('SELECT t.*, u.username FROM tickets t JOIN users u ON u.id=t.user_id WHERE t.id=?').get((req.params as any).id);
     if (!t) throw new HttpError(404, 'NOT_FOUND');
     return { ticket: t, messages: db.prepare('SELECT * FROM ticket_messages WHERE ticket_id=? ORDER BY id').all((t as any).id) };
   });
@@ -766,8 +916,30 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
     db.prepare('UPDATE tickets SET status=? WHERE id=?').run(b.status, (req.params as any).id); return { ok: true };
   });
   app.get('/admin/workspaces', { preHandler: adminAuth }, async () => {
-    const rows = db.prepare('SELECT w.*, (SELECT COUNT(*) FROM workspace_members m WHERE m.workspace_id=w.id) AS members FROM workspaces w ORDER BY w.created_at DESC').all() as any[];
-    return { active: rows.filter(w => !w.wrapped_at), wrapped: rows.filter(w => w.wrapped_at) };
+    const rows = db.prepare('SELECT w.*, (SELECT COUNT(*) FROM workspace_members m WHERE m.workspace_id=w.id) AS members, (SELECT username FROM users WHERE id=w.created_by) AS owner FROM workspaces w ORDER BY w.created_at DESC').all() as any[];
+    const active = rows.filter(w => !w.wrapped_at);
+    const wrapped = rows.filter(w => !!w.wrapped_at);
+    return {
+      active,
+      wrapped,
+      stats: {
+        active: active.length,
+        wrapped: wrapped.length,
+        members: rows.reduce((n, w) => n + Number(w.members || 0), 0),
+      },
+    };
+  });
+  app.get('/admin/audit', { preHandler: adminAuth }, async req => {
+    const q = z.object({ limit: z.coerce.number().min(1).max(200).default(50), offset: z.coerce.number().min(0).default(0) }).parse(req.query);
+    const total = (db.prepare('SELECT COUNT(*) n FROM audit_log').get() as any).n;
+    const rows = db.prepare('SELECT * FROM audit_log ORDER BY at DESC LIMIT ? OFFSET ?').all(q.limit, q.offset) as any[];
+    return {
+      total,
+      entries: rows.map(r => ({
+        id: r.id, at: r.at, actorId: r.actor_id, action: r.action, targetType: r.target_type, targetId: r.target_id,
+        meta: r.meta ? JSON.parse(r.meta) : {},
+      })),
+    };
   });
 
   // ---------- background jobs (run by scheduler in index.ts; exposed for tests)
@@ -818,6 +990,8 @@ export function buildApp(opts: Partial<Ctx> & { cfg?: Partial<Config> } = {}) {
     },
     notify,
   };
+
+  registerMlsRoutes(app, ctx, { auth, getUser, memberOf, convMembers, rateLimit });
 
   return { app, ctx, jobs, calls, joinWorkspace };
 }

@@ -16,7 +16,7 @@ export class LateEmitter implements Emitter {
 
 export function attachRealtime(http: HttpServer, built: Built, emitter: LateEmitter) {
   const { ctx, calls } = built;
-  const io = new IOServer(http, { cors: { origin: true } });
+  const io = new IOServer(http, { cors: { origin: true }, pingInterval: 10_000, pingTimeout: 8_000 });
   emitter.io = io;
   const ringTimers = new Map<string, NodeJS.Timeout>();
 
@@ -46,8 +46,12 @@ export function attachRealtime(http: HttpServer, built: Built, emitter: LateEmit
       for (const u of [c.caller_id, c.callee_id]) emitter.toUser(u, 'call:ended', { callId, reason, status: c.status });
     };
 
-    socket.on('typing', (d: { conversationId: string; to: string[] }) => {
-      for (const u of (d?.to || []).slice(0, 50)) emitter.toUser(u, 'typing', { conversationId: d.conversationId, userId: me });
+    socket.on('typing', (d: { conversationId: string; to?: string[] }) => {
+      if (!d?.conversationId) return;
+      const member = ctx.db.prepare('SELECT 1 FROM conversation_members WHERE conversation_id=? AND user_id=?').get(d.conversationId, me);
+      if (!member) return;
+      const members = ctx.db.prepare('SELECT user_id FROM conversation_members WHERE conversation_id=?').all(d.conversationId) as { user_id: string }[];
+      for (const row of members) if (row.user_id !== me) emitter.toUser(row.user_id, 'typing', { conversationId: d.conversationId, userId: me });
     });
 
     socket.on('call:invite', async (d: { callId: string; to: string }, ack?: (r: any) => void) => {

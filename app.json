@@ -9,7 +9,7 @@
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0E0B10",
     "ios": {
-      "bundleIdentifier": "com.understage.app",
+      "bundleIdentifier": "com.kvmac.understage",
       "supportsTablet": false,
       "infoPlist": {
         "NSCameraUsageDescription": "Understage uses the camera to scan a colleague's QR code and to take photos you send in encrypted chats.",

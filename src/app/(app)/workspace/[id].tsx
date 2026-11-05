@@ -54,9 +54,9 @@ export default function WorkspaceScreen() {
     <View>
       <LinearGradient colors={['#4a1626', '#1a1018']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ paddingHorizontal: 18, paddingVertical: 12 }}>
         <Row>
-          <Tap testID="back" onPress={() => router.back()} style={{ padding: 2 }}><Icon name="back" size={22} color={C.text} /></Tap>
+          <Tap testID="back" onPress={() => (router.canGoBack() ? router.back() : router.replace('/workspace'))} style={{ padding: 2 }}><Icon name="back" size={22} color={C.text} /></Tap>
           <Avatar name={ws.initial} size={50} bg={C.gold} />
-          <View style={{ flex: 1 }}><T serif size={21} numberOfLines={1}>{ws.name}</T><T mu size={12.5} testID="wsmeta">{ws.memberCount} members{ws.venue ? ` · ${ws.venue}` : ''}</T></View>
+          <View style={{ flex: 1 }}><T serif size={21} numberOfLines={2}>{ws.name}</T><T mu size={12.5} testID="wsmeta">{ws.memberCount} members{ws.venue ? ` · ${ws.venue}` : ''}</T></View>
           {ws.conversationId ? <Tap testID="wschat" accessibilityLabel="Company chat" onPress={() => router.push(`/chat/${ws.conversationId}`)} style={{ padding: 6 }}><Icon name="chat" size={22} color={C.text} /></Tap> : null}
           <Tap testID="wsset" accessibilityLabel="Workspace settings" onPress={() => router.push(`/wsset/${ws.id}`)} style={{ padding: 6 }}><Icon name="gear" size={22} color={C.text} /></Tap>
         </Row>

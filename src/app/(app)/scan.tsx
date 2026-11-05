@@ -7,8 +7,8 @@ import { C } from '../../theme';
 import { T, Tap, Button, s } from '../../components/ui';
 import { Icon } from '../../components/Icon';
 import { useApp } from '../../store/app';
-
-export const tokenFromUrl = (data: string) => { const m = data.match(/invite\/([A-Za-z0-9._-]+)/); return m?.[1] ?? null; };
+import { tokenFromInviteUrl as tokenFromUrl } from '../../../shared/deep-link';
+export { tokenFromUrl };
 
 export default function Scan() {
   const [perm, request] = useCameraPermissions(); const toast = useApp(st => st.showToast); const done = useRef(false);

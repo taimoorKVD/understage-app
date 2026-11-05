@@ -12,6 +12,8 @@ import { useApp } from '../store/app';
 import { bus } from './events';
 import { phoneTimezone, tzAbbr, tzCity } from './time';
 import type { Conversation, SelfUser, ServerMessage, PublicUser } from './types';
+import { mergeMessageList, nextSyncCursor } from '../../shared/message-sync';
+import { MLS_DIRECTORY_ENABLED, publishMlsKeyPackagesAfterKeygen } from './mls';
 
 const outbox = new Outbox<OutboxPayload>(items => { try { cache.outboxSave(items); } catch {} });
 const userKeys = new Map<string, string | null>();
@@ -60,6 +62,12 @@ export async function ensureKeys(step?: (n: number) => void) {
   if (!id) { id = generateIdentity(); }
   step?.(2);
   await api('PUT', '/me/keys', { identityKey: id.publicKey });
+  if (MLS_DIRECTORY_ENABLED) {
+    const published = await publishMlsKeyPackagesAfterKeygen(me.id);
+    if (!published.skipped && published.uploaded === 0) {
+      throw new Error('MLS KeyPackage publish uploaded nothing');
+    }
+  }
   step?.(3);
   await secure.setIdentity(me.id, id);
   const fresh = await api<SelfUser>('GET', '/me');
@@ -71,6 +79,7 @@ export async function ensureKeys(step?: (n: number) => void) {
 export async function finishOnboarding() { set({ status: 'ready' }); await startSession(); }
 
 async function signOutLocal() {
+  stopSocketWatch();
   socket?.disconnect(); socket = null; unsubs.forEach(u => u()); unsubs = [];
   await secure.clearSession(); apiSession.set(null);
   try { closeDb(); } catch {}
@@ -86,16 +95,17 @@ apiSession.onSignedOut(() => { signOutLocal(); });
 
 export async function startSession() {
   const convs = cache.get<Conversation[]>('convs');
-  if (convs) putConvs(convs);
+  if (convs) { putConvs(convs); hydrateConversationPreviews(convs); }
   outbox.load(cache.outboxLoad());
   for (const i of outbox.pending()) if (i.payload.file) localFiles.set(i.clientId, i.payload.file.uri);
   connectSocket();
+  startSocketWatch();
   unsubs.push(NetInfo.addEventListener(n => {
     const online = !!n.isConnected && n.isInternetReachable !== false;
     const was = st().online; set({ online });
-    if (online && !was) { refreshAll(); }
+    if (online && !was) wakeRealtime();
   }));
-  const sub = AppState.addEventListener('change', a => { if (a === 'active') { refreshAll(); checkTimezone(); } });
+  const sub = AppState.addEventListener('change', a => { if (a === 'active') { wakeRealtime(); checkTimezone(); } });
   unsubs.push(() => sub.remove());
   await refreshAll();
   checkTimezone();
@@ -107,6 +117,7 @@ export async function refreshAll() {
     await refreshMe();
     await refreshConversations();
     await syncMessages();
+    await syncOutgoingReceipts();
     await refreshHeld();
     api('GET', '/workspaces').then(r => set({ workspaces: r.workspaces })).catch(() => {});
   } catch (e) { if (!(e instanceof NetworkError)) console.warn('refresh', e); }
@@ -136,7 +147,37 @@ function putConvs(list: Conversation[]) {
 export async function refreshConversations() {
   const r = await api<{ conversations: Conversation[] }>('GET', '/conversations');
   putConvs(r.conversations); cache.set('convs', r.conversations);
+  hydrateConversationPreviews(r.conversations);
   return r.conversations;
+}
+function hydrateConversationPreviews(convs: Conversation[]) {
+  const s = st();
+  const messages = { ...s.messages };
+  let changed = false;
+  for (const c of convs) {
+    if (!messages[c.id]?.length) {
+      try {
+        const cached = cache.messages(c.id);
+        if (cached.length) { messages[c.id] = cached; changed = true; }
+      } catch { /* db not open yet */ }
+    }
+    const list = messages[c.id];
+    if (c.lastMessage) {
+      if (!list?.some(m => m.body)) ingest([c.lastMessage]).catch(() => {});
+      else applyMessageStatus(c.lastMessage);
+    }
+  }
+  if (changed) set({ messages });
+}
+export function dropConversation(id: string) {
+  const s = st();
+  const conversations = { ...s.conversations }; delete conversations[id];
+  const msgs = { ...s.messages }; delete msgs[id];
+  const typing = { ...s.typing }; delete typing[id];
+  set({ conversations, messages: msgs, typing, convOrder: s.convOrder.filter(x => x !== id) });
+  try {
+    cache.set('convs', (cache.get<Conversation[]>('convs') ?? []).filter(c => c.id !== id));
+  } catch {}
 }
 let convTimer: ReturnType<typeof setTimeout> | null = null;
 const refreshConvsSoon = () => { if (convTimer) clearTimeout(convTimer); convTimer = setTimeout(() => refreshConversations().catch(() => {}), 600); };
@@ -163,9 +204,7 @@ async function keyFor(userId: string): Promise<string | null> {
 }
 function putLocal(m: LocalMessage) {
   const s = st();
-  const list = (s.messages[m.conversationId] ?? []).filter(x => x.key !== m.key && x.clientId !== m.clientId);
-  list.push(m);
-  list.sort((a, b) => (a.seq ?? 9e15) - (b.seq ?? 9e15) || a.createdAt - b.createdAt);
+  const list = mergeMessageList(s.messages[m.conversationId] ?? [], m);
   set({ messages: { ...s.messages, [m.conversationId]: list } });
   try { cache.upsertMessage(m); } catch {}
 }
@@ -185,7 +224,7 @@ async function ingest(msgs: ServerMessage[]) {
       if (!body && pub) { userKeys.delete(m.senderId); const fresh = await keyFor(m.senderId); if (fresh && fresh !== pub) body = decryptPayload(m.nonce, m.ciphertext, fresh, sk); }
     }
     putLocal({ key: m.id, id: m.id, clientId: m.clientId, conversationId: m.conversationId, seq: m.seq, senderId: m.senderId, createdAt: m.createdAt, body,
-      status: m.senderId === me ? ((m.status as LocalStatus) || 'sent') : 'sent', readBy: m.readBy, recipients: m.recipients, error: null });
+      status: m.senderId === me ? ((m.status as LocalStatus) || 'sent') : 'sent', readBy: m.readBy, recipients: m.recipients, readByUserIds: m.readByUserIds, error: null });
     if (m.senderId !== me) delivered.push(m.id);
   }
   if (delivered.length) api('POST', '/messages/delivered', { messageIds: delivered }).catch(() => {});
@@ -195,7 +234,7 @@ export async function syncMessages() {
   for (let i = 0; i < 20; i++) {
     const r = await api<{ messages: ServerMessage[]; cursor: number }>('GET', `/sync?since=${cursor}&limit=500`);
     await ingest(r.messages);
-    cursor = r.cursor; cache.set('cursor', cursor);
+    cursor = nextSyncCursor(r.cursor, r.messages); cache.set('cursor', cursor);
     if (r.messages.length < 500) break;
   }
 }
@@ -253,7 +292,8 @@ async function sendItem(item: OutboxItem<OutboxPayload>) {
   if (!identity) throw new PermanentSendError('Encryption keys missing on this phone');
   let conv = st().conversations[item.conversationId] ?? await refreshConversation(item.conversationId);
   if (conv.readonly) throw new PermanentSendError('This chat is read-only');
-  if (conv.memberCount > conv.members.length) throw new PermanentSendError('Encrypted chat is limited to 50 members in this build');
+  if (conv.e2eeError === 'GROUP_TOO_LARGE_FOR_E2EE') throw new PermanentSendError('This conversation is too large for end-to-end encryption');
+  if (conv.kind === 'group' && conv.memberCount > conv.members.length) throw new PermanentSendError('Encrypted chat is limited to 50 members in this build');
   const noKey = conv.members.filter(m => !m.identityKey);
   if (noKey.length) { conv = await refreshConversation(conv.id); const still = conv.members.filter(m => !m.identityKey); if (still.length) throw new PermanentSendError(`${still[0].displayName || 'A member'} hasn't set up encryption yet`); }
   const p = item.payload;
@@ -270,7 +310,7 @@ async function sendItem(item: OutboxItem<OutboxPayload>) {
   const payloads = encryptForRecipients(p.plain, conv.members.map(m => ({ id: m.id, publicKey: m.identityKey! })), identity.secretKey);
   const r = await wrapErr(() => api<{ message: ServerMessage }>('POST', `/conversations/${conv.id}/messages`, { clientId: item.clientId, payloads }), conv.id);
   const m = r.message;
-  putLocal({ key: m.id, id: m.id, clientId: m.clientId, conversationId: m.conversationId, seq: m.seq, senderId: m.senderId, createdAt: m.createdAt, body: p.plain, status: (m.status as LocalStatus) || 'sent', readBy: m.readBy, recipients: m.recipients });
+  putLocal({ key: m.id, id: m.id, clientId: m.clientId, conversationId: m.conversationId, seq: m.seq, senderId: m.senderId, createdAt: m.createdAt, body: p.plain, status: (m.status as LocalStatus) || 'sent', readBy: m.readBy, recipients: m.recipients, readByUserIds: m.readByUserIds });
   refreshConvsSoon();
   return { serverId: m.id };
 }
@@ -303,10 +343,72 @@ export async function fetchAttachment(att: AttachmentRef): Promise<string> {
 }
 
 // ------------------------------------------------------------------ realtime
+function applyMessageStatus(m: ServerMessage) {
+  if (!m?.id || !m.conversationId) return;
+  let list = st().messages[m.conversationId];
+  if (!list) {
+    try { list = cache.messages(m.conversationId); } catch { list = []; }
+    if (list.length) set({ messages: { ...st().messages, [m.conversationId]: list } });
+  }
+  const x = (list ?? []).find(y => y.id === m.id || (!!m.clientId && y.clientId === m.clientId));
+  if (!x) return;
+  putLocal({
+    ...x,
+    status: (m.status as LocalStatus) || x.status,
+    readBy: m.readBy,
+    recipients: m.recipients,
+    readByUserIds: m.readByUserIds ?? x.readByUserIds,
+  });
+}
+
+async function syncOutgoingReceipts() {
+  const me = myId();
+  if (!me) return;
+  const loaded = Object.entries(st().messages);
+  for (const [convId, list] of loaded) {
+    if (!list?.some(m => m.senderId === me && m.id && m.status !== 'read')) continue;
+    try {
+      const r = await api<{ messages: ServerMessage[] }>('GET', `/conversations/${convId}/messages?limit=50`);
+      for (const m of r.messages) if (m.senderId === me) applyMessageStatus(m);
+    } catch {}
+  }
+}
+
+let socketWatch: ReturnType<typeof setInterval> | null = null;
+function startSocketWatch() {
+  if (socketWatch) return;
+  socketWatch = setInterval(() => {
+    if (!apiSession.get()) return;
+    ensureSocket();
+  }, 12_000);
+}
+function stopSocketWatch() {
+  if (socketWatch) { clearInterval(socketWatch); socketWatch = null; }
+}
+function ensureSocket() {
+  if (!apiSession.get()) return;
+  if (!socket) connectSocket();
+  else if (!socket.connected) socket.connect();
+}
+function wakeRealtime() {
+  ensureSocket();
+  refreshAll().catch(() => {});
+}
+
 function connectSocket() {
   const s = apiSession.get(); if (!s) return;
   socket?.disconnect();
-  socket = io(SOCKET_URL, { transports: ['websocket'], auth: cb => cb({ token: apiSession.get()?.accessToken }), reconnectionDelayMax: 10_000 });
+  socket = io(SOCKET_URL, {
+    transports: ['websocket'],
+    upgrade: false,
+    auth: (cb: (d: { token?: string }) => void) => cb({ token: apiSession.get()?.accessToken }),
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 400,
+    reconnectionDelayMax: 5_000,
+    timeout: 15_000,
+    randomizationFactor: 0.4,
+  });
   socket.on('connect', () => { set({ socketConnected: true }); refreshAll(); });
   socket.on('disconnect', () => set({ socketConnected: false }));
   socket.on('connect_error', async (e: Error) => {
@@ -314,13 +416,10 @@ function connectSocket() {
   });
   socket.on('message:new', async (m: ServerMessage) => {
     if (!st().conversations[m.conversationId]) await refreshConversation(m.conversationId).catch(() => {});
-    await ingest([m]); cache.set('cursor', Math.max(cache.get<number>('cursor') ?? 0, m.seq));
+    await ingest([m]); cache.set('cursor', nextSyncCursor(cache.get<number>('cursor') ?? 0, [m]));
     bus.emit('message:new', m); refreshConvsSoon();
   });
-  socket.on('message:status', (m: ServerMessage) => {
-    const list = st().messages[m.conversationId]; if (!list) return;
-    const x = list.find(y => y.id === m.id); if (x) putLocal({ ...x, status: (m.status as LocalStatus) || x.status, readBy: m.readBy, recipients: m.recipients });
-  });
+  socket.on('message:status', (m: ServerMessage) => { applyMessageStatus(m); });
   socket.on('typing', (d: { conversationId: string; userId: string }) => {
     const s = st(); const until = Date.now() + 4000;
     set({ typing: { ...s.typing, [d.conversationId]: [...(s.typing[d.conversationId] ?? []).filter(t => t.userId !== d.userId && t.until > Date.now()), { userId: d.userId, until }] } });

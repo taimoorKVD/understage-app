@@ -9,7 +9,7 @@ import { useApp } from '../../store/app';
 export default function MyQr() {
   const me = useApp(st => st.me)!;
   const [inv, setInv] = useState<{ url: string; expiresAt: number } | null>(null); const [err, setErr] = useState<string | null>(null);
-  const fetchInvite = () => api('POST', '/invites', { kind: 'contact' }).then(setInv).catch(e => setErr(errMsg(e)));
+  const fetchInvite = () => api('POST', '/invites/regenerate', { kind: 'contact', ttlSec: 7 * 86400 }).then(setInv).catch(e => setErr(errMsg(e)));
   const make = () => { setErr(null); fetchInvite(); };
   useEffect(() => { fetchInvite(); }, []); // create one invite on mount
   return (

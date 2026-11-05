@@ -2,6 +2,18 @@
 
 Work chat for theatre and touring crews. It is built with React Native, Expo SDK 58 and TypeScript for iOS, and has a real Fastify + SQLite + Socket.IO backend.
 
+## Quick start on Mac (real iPhone)
+
+**Requirements:** Expo SDK 58 officially needs **Xcode 26.4+**, which needs **macOS Tahoe 26.2+**. Xcode 16.x can't build it. On a Mac that can't run Tahoe, install **Xcode 26.3** (macOS 15.6+, from developer.apple.com/download/all) and run `npm run mac:setup -- --force-xcode`. That path is experimental: every Expo module is compiled from source because the prebuilt ones need Swift 6.3. The scripts use Node 22 LTS: they find an existing Node 22 (~/.local/node, nvm, fnm, Homebrew) or download one to `~/.local/node22`, and leave any other Node alone. The iPhone needs iOS 16.4+ and must be on the same Wi-Fi.
+
+```bash
+cd ~/Downloads/understage-app
+npm run mac:setup     # one time, safe to re-run: Xcode, CocoaPods, npm deps, .env, demo DB, ios/, pods
+npm run mac:launch    # each session: detects the Mac IP, starts the backend, builds + installs on the iPhone
+```
+
+Options: `npm run mac:launch -- --release` builds a standalone build that runs without Metro. `--device "<name or UDID>"` picks the phone, and `--no-build` starts only the backend. `npm run mac:setup -- --clean` regenerates `ios/`. Dev sign-in codes are written to `logs/server.log`. On the first build, follow the signing steps the launch script prints.
+
 ```
 src/            Expo Router app (screens in src/app, logic in src/lib, UI in src/components)
 shared/         E2EE envelope code shared by app and server tests (tweetnacl)
@@ -91,7 +103,7 @@ See `server/.env.example` (the server loads `server/.env` if present; real envir
 | `SMS_PROVIDER=twilio`, `TWILIO_SID`, `TWILIO_TOKEN`, `TWILIO_FROM` | Real SMS OTP (untested). Production refuses to boot without these |
 | `EXPO_PUSH_ENABLED=1` | Send pushes through the Expo push service (needs APNs setup) |
 | `TURN_URLS` (comma-sep), `TURN_USERNAME`, `TURN_CREDENTIAL` | TURN relay returned by `GET /calls/ice` |
-| `SUBSCRIPTIONS_DEV=1` | Lets `/subscriptions/verify {dev:true}` start a trial without App Store validation (**dev only**) |
+| `SUBSCRIPTIONS_DEV=1` | **Deprecated.** `/subscriptions/verify` no longer grants a trial from `{dev:true}`; a verified signed-transaction JWS is required. See `docs/PUSH_AND_IAP_REQUIREMENTS.md`. |
 
 ## Configuration for production features
 
@@ -104,7 +116,7 @@ See `server/.env.example` (the server loads `server/.env` if present; real envir
 - **TURN:** run coturn or use a hosted TURN service, then set `TURN_*`. Without TURN, calls between phones on different NAT'd networks will often fail. STUN only is the default.
 - **In-app purchase:**
   - Create the auto-renewing subscriptions `com.understage.production.monthly` and `com.understage.company.monthly` in App Store Connect.
-  - The server's `/subscriptions/verify` returns `501 IAP_NOT_CONFIGURED` until App Store Server API validation is implemented with `APPSTORE_ISSUER_ID/KEY_ID/PRIVATE_KEY`. That validation is **not implemented yet**.
+  - `/subscriptions/verify` verifies an App Store signed-transaction JWS against configured Apple root CAs (no App Store Connect API key required). It returns `501 IAP_NOT_CONFIGURED` until roots are provided, and never grants a plan without a verified JWS. See `docs/PUSH_AND_IAP_REQUIREMENTS.md`.
   - Prices in `/subscriptions/plans` are samples.
 
 See `ASSUMPTIONS.md` and `FEATURE_MATRIX.md`.

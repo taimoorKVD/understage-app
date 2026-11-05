@@ -38,9 +38,9 @@ export default function Acks() {
             <Avatar name={p.displayName ?? ''} uri={p.avatar} size={32} /><T size={14} style={{ flex: 1 }}>{p.displayName}</T>
             <T mu size={12}>{p.seenAt ? `Seen ${clock(p.seenAt)}` : !p.onShift ? `Off shift · gets it at ${p.shift.start}` : 'Not opened'}</T>
           </Row>))}
-        {left ? <Button testID="remind" title={`Remind ${left} people`} variant="secondary" loading={busy} onPress={async () => {
+        {left ? <Button testID="remind" title={`Remind ${left} ${left === 1 ? 'person' : 'people'}`} variant="secondary" loading={busy} onPress={async () => {
           setBusy(true);
-          try { const r = await api('POST', `/announcements/${id}/remind`); toast(`Reminder sent to ${r.deliveredNow}${r.held ? ` · ${r.held} off shift get it when their shift starts` : ''}`); load(); }
+          try { const r = await api('POST', `/announcements/${id}/remind`); toast(`Reminder sent to ${r.deliveredNow}${r.held ? ` · ${r.held} off shift ${r.held === 1 ? 'gets' : 'get'} it when their shift starts` : ''}`); load(); }
           catch (e) { toast(errMsg(e)); } finally { setBusy(false); }
         }} /> : <T style={{ color: C.green, textAlign: 'center' }}>Everyone has acknowledged 🎉</T>}
         {d.acknowledged.length ? <Label>Acknowledged ({d.acknowledged.length})</Label> : null}

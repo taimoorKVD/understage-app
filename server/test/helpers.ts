@@ -2,11 +2,11 @@ import { buildApp } from '../src/app';
 import { MemoryPushSender, ConsoleOtpSender } from '../src/providers';
 import { generateIdentity, type Identity } from '../../shared/e2ee';
 
-export function setup(clock?: () => number) {
+export function setup(clock?: () => number, cfg?: { mlsDirectoryEnabled?: boolean }) {
   const push = new MemoryPushSender();
   const otp = new ConsoleOtpSender();
   const events: { user: string; event: string; data: any }[] = [];
-  const built = buildApp({ push, otp, clock, emit: { toUser: (user, event, data) => { events.push({ user, event, data }); }, isOnline: () => false } });
+  const built = buildApp({ push, otp, clock, cfg, emit: { toUser: (user, event, data) => { events.push({ user, event, data }); }, isOnline: () => false } });
   return { ...built, push, otp, events };
 }
 
@@ -27,3 +27,8 @@ export async function signup(t: ReturnType<typeof setup>, username: string, extr
 }
 
 export const H = (u: TUser) => ({ authorization: `Bearer ${u.token}` });
+
+export function grantPlan(t: ReturnType<typeof setup>, user: TUser, plan: 'production' | 'company', renewsAt?: number) {
+  t.ctx.db.prepare("UPDATE users SET plan=?, plan_status='trial', plan_renews_at=? WHERE id=?").run(plan, renewsAt ?? (Date.now() + 14 * 86_400_000), user.id);
+}
+

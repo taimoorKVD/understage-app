@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS users (
   avatar TEXT,
   identity_key TEXT,                          -- X25519 public key (base64)
   key_updated_at INTEGER,
+  mls_signature_key TEXT,                     -- Ed25519 signature public key (base64)
+  mls_credential_identity TEXT,
+  mls_key_updated_at INTEGER,
   timezone TEXT NOT NULL DEFAULT 'Europe/London',
   follow_phone_tz INTEGER NOT NULL DEFAULT 1,
   touring_mode INTEGER NOT NULL DEFAULT 0,
@@ -121,14 +124,77 @@ CREATE TABLE IF NOT EXISTS held_notifications (
 CREATE TABLE IF NOT EXISTS calls (
   id TEXT PRIMARY KEY, caller_id TEXT NOT NULL, callee_id TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER NOT NULL, answered_at INTEGER, ended_at INTEGER, end_reason TEXT
 );
+CREATE TABLE IF NOT EXISTS audit_log (
+  id TEXT PRIMARY KEY,
+  at INTEGER NOT NULL,
+  actor_id TEXT,
+  action TEXT NOT NULL,
+  target_type TEXT,
+  target_id TEXT,
+  meta TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
+
+CREATE TABLE IF NOT EXISTS mls_key_packages (
+  hash_ref TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  ciphertext TEXT NOT NULL,
+  last_resort INTEGER NOT NULL DEFAULT 0,
+  not_before INTEGER NOT NULL,
+  not_after INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS mls_groups (
+  conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+  group_id TEXT NOT NULL,
+  epoch INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mls_messages (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  sender_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mls_welcomes (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  recipient_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
+  body TEXT NOT NULL,
+  commit_id TEXT NOT NULL REFERENCES mls_messages(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mls_kp_user ON mls_key_packages(user_id, last_resort, not_after, created_at);
+CREATE INDEX IF NOT EXISTS idx_mls_msg_conv ON mls_messages(conversation_id, epoch, created_at);
+CREATE INDEX IF NOT EXISTS idx_mls_welcome_rcpt ON mls_welcomes(conversation_id, recipient_id, epoch);
 CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id, seq);
 CREATE INDEX IF NOT EXISTS idx_payload_rcpt ON message_payloads(recipient_id);
 CREATE INDEX IF NOT EXISTS idx_cm_user ON conversation_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_wm_user ON workspace_members(user_id);
 `;
 
+
+function columnNames(db: DB, table: string): Set<string> {
+  return new Set((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(r => r.name));
+}
+
+/** Additive MLS columns/tables for databases created before Phase 2. */
+export function migrateMls(db: DB) {
+  const cols = columnNames(db, 'users');
+  if (!cols.has('mls_signature_key')) db.exec('ALTER TABLE users ADD COLUMN mls_signature_key TEXT');
+  if (!cols.has('mls_credential_identity')) db.exec('ALTER TABLE users ADD COLUMN mls_credential_identity TEXT');
+  if (!cols.has('mls_key_updated_at')) db.exec('ALTER TABLE users ADD COLUMN mls_key_updated_at INTEGER');
+}
+
 export function openDb(file = ':memory:'): DB {
   const db = new Database(file);
   db.exec(SCHEMA);
+  migrateMls(db);
   return db;
 }

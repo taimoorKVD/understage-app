@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { setup, signup, H } from './helpers';
+import { setup, signup, H, grantPlan } from './helpers';
+import { buildApp } from '../src/app';
+import { ConsoleOtpSender, MemoryPushSender } from '../src/providers';
 import { encryptForRecipients, decryptPayload, safetyNumber, encryptBlob, decryptBlob, base64 } from '../../shared/e2ee';
 import { isOnShift } from '../src/util';
 
@@ -136,6 +138,7 @@ describe('E2EE messaging', () => {
     for (const u of [a, c, d]) await t.app.inject({ method: 'POST', url: `/conversations/${g.id}/read`, headers: H(u), payload: { seq: r.json().message.seq } });
     const mine = (await t.app.inject({ method: 'GET', url: `/conversations/${g.id}/messages`, headers: H(b) })).json().messages[0];
     expect(mine.readBy).toBe(3); expect(mine.status).toBe('read');
+    expect(mine.readByUserIds.sort()).toEqual([a.id, c.id, d.id].sort());
     await t.app.inject({ method: 'PATCH', url: `/conversations/${g.id}/members/${b.id}`, headers: H(a), payload: { role: 'admin' } });
     expect((await t.app.inject({ method: 'PATCH', url: `/conversations/${g.id}`, headers: H(b), payload: { title: 'LX, Sound & Video' } })).statusCode).toBe(200);
     expect((await t.app.inject({ method: 'DELETE', url: `/conversations/${g.id}/members/${d.id}`, headers: H(b) })).statusCode).toBe(200);
@@ -179,6 +182,7 @@ describe('QR invites', () => {
     let clock = Date.now();
     const t = setup(() => clock);
     const a = await signup(t, 'priya.dsm'); const b = await signup(t, 'sophie.sm');
+    grantPlan(t, a, 'company');
     const inv = (await t.app.inject({ method: 'POST', url: '/invites', headers: H(a), payload: { ttlSec: 600 } })).json();
     expect(inv.url).toMatch(/^understage:\/\/invite\/us1\./);
     const res = (await t.app.inject({ method: 'POST', url: '/invites/resolve', headers: H(b), payload: { token: inv.url } })).json();
@@ -189,8 +193,16 @@ describe('QR invites', () => {
     expect((await t.app.inject({ method: 'POST', url: '/invites/resolve', headers: H(b), payload: { token: 'https://evil.example' } })).json().error).toBe('INVITE_INVALID');
     const acc = await t.app.inject({ method: 'POST', url: '/invites/accept', headers: H(b), payload: { token: inv.token } });
     expect(acc.json().contact.username).toBe('priya.dsm');
+    expect(acc.json().alreadyContact).toBe(false);
+    const again = await t.app.inject({ method: 'POST', url: '/invites/accept', headers: H(b), payload: { token: inv.token } });
+    expect(again.statusCode).toBe(200);
+    expect(again.json()).toMatchObject({ kind: 'contact', alreadyContact: true });
+    expect(again.json().contact.username).toBe('priya.dsm');
+    const pair = (t.ctx.db.prepare('SELECT COUNT(*) n FROM contacts WHERE (owner_id=? AND contact_id=?) OR (owner_id=? AND contact_id=?)').get(a.id, b.id, b.id, a.id) as { n: number }).n;
+    expect(pair).toBe(2);
     const contacts = (await t.app.inject({ method: 'GET', url: '/contacts', headers: H(a) })).json().contacts;
     expect(contacts.map((c: any) => c.username)).toContain('sophie.sm');
+    expect(contacts.filter((c: any) => c.username === 'sophie.sm')).toHaveLength(1);
     clock += 601_000;
     const exp = await t.app.inject({ method: 'POST', url: '/invites/resolve', headers: H(b), payload: { token: inv.token } });
     expect(exp.statusCode).toBe(410); expect(exp.json().error).toBe('INVITE_EXPIRED');
@@ -207,6 +219,7 @@ describe('workspaces, announcements & acknowledgements', () => {
   it('200-person workspace, ack tracking, remind w/ quiet hours, wrap → read-only', async () => {
     const t = setup();
     const admin = await signup(t, 'sophie.sm');
+    grantPlan(t, admin, 'company');
     const ws = (await t.app.inject({ method: 'POST', url: '/workspaces', headers: H(admin), payload: { name: 'Hamlet UK Tour 2027', venue: 'Lyceum, Edinburgh', departments: ['Stage Management', 'Lighting'] } })).json().workspace;
     const crew = [];
     for (let i = 0; i < 199; i++) {
@@ -255,7 +268,11 @@ describe('workspaces, announcements & acknowledgements', () => {
     expect((await t.app.inject({ method: 'POST', url: `/workspaces/${ws.id}/announcements`, headers: H(admin), payload: { title: 'x', body: 'y' } })).json().error).toBe('WORKSPACE_WRAPPED');
     expect((await t.app.inject({ method: 'POST', url: `/announcements/${annId}/ack`, headers: H(crew[180]) })).json().error).toBe('WORKSPACE_WRAPPED');
     const convs = (await t.app.inject({ method: 'GET', url: '/conversations', headers: H(admin) })).json().conversations;
-    expect(convs.find((c: any) => c.kind === 'workspace').readonly).toBe(true);
+    const wsChat = convs.find((c: any) => c.kind === 'workspace');
+    expect(wsChat.readonly).toBe(true);
+    expect(wsChat.e2eeError).toBe('GROUP_TOO_LARGE_FOR_E2EE');
+    expect(wsChat.members.length).toBe(wsChat.memberCount);
+    expect(wsChat.memberCount).toBe(200);
     const admin2 = (await t.app.inject({ method: 'GET', url: '/admin/workspaces', headers: H(admin) }));
     expect(admin2.statusCode).toBe(403);
   }, 60_000);
@@ -314,6 +331,11 @@ describe('admin, subscriptions, support', () => {
     expect(mine.messages.map((m: any) => m.author)).toEqual(['user', 'support']);
     expect((await t.app.inject({ method: 'GET', url: `/support/tickets/${tk.id}`, headers: H(bad) })).statusCode).not.toBe(200);
     expect((await t.app.inject({ method: 'GET', url: '/admin/workspaces', headers: H(admin) })).json()).toHaveProperty('wrapped');
+    const audit = (await t.app.inject({ method: 'GET', url: '/admin/audit', headers: H(admin) })).json();
+    expect(audit.entries.some((e: any) => e.action === 'admin.report_status')).toBe(true);
+    expect(audit.entries.some((e: any) => e.action === 'admin.suspend')).toBe(true);
+    expect(audit.entries.some((e: any) => e.action === 'admin.unsuspend')).toBe(true);
+    expect((await t.app.inject({ method: 'GET', url: '/admin/audit', headers: H(a) })).statusCode).toBe(403);
   });
 
   it('subscriptions: plans listed; receipt validation refuses without IAP config', async () => {
@@ -323,5 +345,204 @@ describe('admin, subscriptions, support', () => {
     expect(plans.plans.map((p: any) => p.priceGBP)).toEqual([0, 49, 149]); expect(plans.trialDays).toBe(14);
     const v = await t.app.inject({ method: 'POST', url: '/subscriptions/verify', headers: H(a), payload: { planId: 'company', transactionId: 'x' } });
     expect(v.statusCode).toBe(501);
+  });
+
+  it('serves the web admin UI without auth and keeps admin APIs protected', async () => {
+    const t = setup();
+    const html = await t.app.inject({ method: 'GET', url: '/admin' });
+    expect(html.statusCode).toBe(200);
+    expect(String(html.headers['content-type'])).toMatch(/text\/html/);
+    expect(html.body).toContain('Understage Admin');
+    expect((await t.app.inject({ method: 'GET', url: '/admin/' })).statusCode).toBe(200);
+    const js = await t.app.inject({ method: 'GET', url: '/admin/app.js' });
+    expect(js.statusCode).toBe(200);
+    expect(js.headers['content-type']).toMatch(/javascript/);
+    expect(js.body).toContain('Everything else stays end-to-end encrypted. Admins only see what the reporter chose to share.');
+    expect(js.body).toContain('Send & close');
+    expect((await t.app.inject({ method: 'GET', url: '/admin/reports' })).statusCode).toBe(401);
+  });
+
+  it('workspace stats include owner and member totals; x-admin-token authenticates', async () => {
+    const t = setup();
+    const admin = await signup(t, 'ops.admin'); t.ctx.db.prepare('UPDATE users SET is_admin=1 WHERE id=?').run(admin.id);
+    const a = await signup(t, 'sophie.sm');
+    grantPlan(t, a, 'company');
+    const ws = (await t.app.inject({ method: 'POST', url: '/workspaces', headers: H(a), payload: { name: 'Hamlet UK Tour 2027' } })).json().workspace;
+    const body = (await t.app.inject({ method: 'GET', url: '/admin/workspaces', headers: H(admin) })).json();
+    expect(body.stats.active).toBeGreaterThanOrEqual(1);
+    expect(body.stats.members).toBeGreaterThanOrEqual(1);
+    expect(body.stats).toHaveProperty('wrapped');
+    expect(body.active.find((w: any) => w.id === ws.id).owner).toBe('sophie.sm');
+
+    const built = buildApp({ push: new MemoryPushSender(), otp: new ConsoleOtpSender(), cfg: { adminToken: 'test-admin-token' }, emit: { toUser() {}, isOnline: () => false } });
+    try {
+      expect((await built.app.inject({ method: 'GET', url: '/admin/reports' })).statusCode).toBe(401);
+      const ok = await built.app.inject({ method: 'GET', url: '/admin/reports', headers: { 'x-admin-token': 'test-admin-token' } });
+      expect(ok.statusCode).toBe(200);
+      expect(ok.json().reports).toEqual([]);
+    } finally {
+      await built.app.close();
+    }
+  });
+});
+
+
+function seedUsers(t: ReturnType<typeof setup>, n: number, prefix: string) {
+  const ids: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const id = `usr_${prefix}${i}`;
+    t.ctx.db.prepare('INSERT INTO users (id, identifier_hash, identifier_kind, display_name, username, created_at) VALUES (?,?,?,?,?,?)')
+      .run(id, `h_${prefix}${i}`, 'phone', `${prefix} ${i}`, `${prefix}${i}`, Date.now());
+    ids.push(id);
+  }
+  return ids;
+}
+
+describe('plan enforcement, e2ee caps, visibility, invites, rate limits & search', () => {
+  it('free cannot create a workspace; Production clamps to 50 seats; Company up to 200', async () => {
+    const t = setup();
+    const a = await signup(t, 'sophie.sm');
+    const free = await t.app.inject({ method: 'POST', url: '/workspaces', headers: H(a), payload: { name: 'Hamlet UK Tour 2027' } });
+    expect(free.statusCode).toBe(403); expect(free.json().error).toBe('PLAN_REQUIRED');
+
+    grantPlan(t, a, 'production');
+    const prod = (await t.app.inject({ method: 'POST', url: '/workspaces', headers: H(a), payload: { name: 'Hamlet UK Tour 2027', seatLimit: 200 } })).json().workspace;
+    expect(prod.seatLimit).toBe(50); expect(prod.plan).toBe('production');
+
+    grantPlan(t, a, 'company');
+    const company = (await t.app.inject({ method: 'POST', url: '/workspaces', headers: H(a), payload: { name: 'Company House' } })).json().workspace;
+    expect(company.seatLimit).toBe(200); expect(company.plan).toBe('company');
+
+    const clamped = (await t.app.inject({ method: 'POST', url: '/workspaces', headers: H(a), payload: { name: 'Eighty Seats', seatLimit: 80 } })).json().workspace;
+    expect(clamped.seatLimit).toBe(80);
+
+    grantPlan(t, a, 'company', Date.now() - 1000);
+    const expired = await t.app.inject({ method: 'POST', url: '/workspaces', headers: H(a), payload: { name: 'Expired Trial Co' } });
+    expect(expired.statusCode).toBe(403); expect(expired.json().error).toBe('PLAN_REQUIRED');
+  });
+
+  it('encrypted groups reject more than 50 members on create and add-members', async () => {
+    const t = setup();
+    const a = await signup(t, 'sophie.sm');
+    const extras = seedUsers(t, 51, 'g');
+    const tooBig = await t.app.inject({ method: 'POST', url: '/conversations', headers: H(a), payload: { kind: 'group', title: 'Too big', memberIds: extras } });
+    expect(tooBig.statusCode).toBe(409); expect(tooBig.json().error).toBe('GROUP_TOO_LARGE_FOR_E2EE');
+
+    const ok = (await t.app.inject({ method: 'POST', url: '/conversations', headers: H(a), payload: { kind: 'group', title: 'Almost full', memberIds: extras.slice(0, 48) } })).json().conversation;
+    expect(ok.memberCount).toBe(49);
+    const overflow = await t.app.inject({ method: 'POST', url: `/conversations/${ok.id}/members`, headers: H(a), payload: { userIds: extras.slice(48, 51) } });
+    expect(overflow.statusCode).toBe(409); expect(overflow.json().error).toBe('GROUP_TOO_LARGE_FOR_E2EE');
+    const oneMore = await t.app.inject({ method: 'POST', url: `/conversations/${ok.id}/members`, headers: H(a), payload: { userIds: [extras[48]] } });
+    expect(oneMore.statusCode).toBe(200);
+    expect(oneMore.json().conversation.memberCount).toBe(50);
+    const fiftyFirst = await t.app.inject({ method: 'POST', url: `/conversations/${ok.id}/members`, headers: H(a), payload: { userIds: [extras[49]] } });
+    expect(fiftyFirst.statusCode).toBe(409); expect(fiftyFirst.json().error).toBe('GROUP_TOO_LARGE_FOR_E2EE');
+  });
+
+  it('workspace chats over 50 members return GROUP_TOO_LARGE_FOR_E2EE without truncating the member list', async () => {
+    const t = setup();
+    const admin = await signup(t, 'sophie.sm');
+    grantPlan(t, admin, 'company');
+    const ws = (await t.app.inject({ method: 'POST', url: '/workspaces', headers: H(admin), payload: { name: 'Hamlet UK Tour 2027' } })).json().workspace;
+    for (const id of seedUsers(t, 54, 'w')) t.joinWorkspace(ws.id, id, 'member', null);
+    const conv = (await t.app.inject({ method: 'GET', url: `/conversations/${ws.conversationId}`, headers: H(admin) })).json().conversation;
+    expect(conv.e2eeError).toBe('GROUP_TOO_LARGE_FOR_E2EE');
+    expect(conv.members.length).toBe(conv.memberCount);
+    expect(conv.memberCount).toBe(55);
+    const msg = await t.app.inject({ method: 'POST', url: `/conversations/${ws.conversationId}/messages`, headers: H(admin), payload: { clientId: 'big-ws-0001', payloads: [{ recipientId: admin.id, nonce: 'n', ciphertext: 'c' }] } });
+    expect(msg.statusCode).toBe(409); expect(msg.json().error).toBe('GROUP_TOO_LARGE_FOR_E2EE');
+  });
+
+  it('GET /users/:id is limited to contacts, shared chats/workspaces, or a valid invite', async () => {
+    const t = setup();
+    const a = await signup(t, 'sophie.sm'); const b = await signup(t, 'marcus.lx'); const c = await signup(t, 'eve.stranger');
+    expect((await t.app.inject({ method: 'GET', url: `/users/${c.id}`, headers: H(a) })).statusCode).toBe(404);
+    expect((await t.app.inject({ method: 'GET', url: `/users/${c.id}`, headers: H(a) })).json().error).toBe('USER_NOT_FOUND');
+    await t.app.inject({ method: 'POST', url: '/contacts', headers: H(a), payload: { userId: b.id } });
+    expect((await t.app.inject({ method: 'GET', url: `/users/${b.id}`, headers: H(a) })).statusCode).toBe(200);
+    const inv = (await t.app.inject({ method: 'POST', url: '/invites', headers: H(a), payload: { kind: 'contact' } })).json();
+    expect((await t.app.inject({ method: 'GET', url: `/users/${a.id}?inviteToken=${encodeURIComponent(inv.token)}`, headers: H(c) })).statusCode).toBe(200);
+    expect((await t.app.inject({ method: 'GET', url: `/users/${a.id}?inviteToken=not-a-token`, headers: H(c) })).statusCode).toBe(404);
+  });
+
+  it('regenerating a contact invite revokes the previous one; workspace accept is idempotent', async () => {
+    const t = setup();
+    const a = await signup(t, 'priya.dsm'); const b = await signup(t, 'sophie.sm');
+    grantPlan(t, a, 'company');
+    const first = (await t.app.inject({ method: 'POST', url: '/invites', headers: H(a), payload: { kind: 'contact' } })).json();
+    const next = (await t.app.inject({ method: 'POST', url: '/invites/regenerate', headers: H(a), payload: { kind: 'contact' } })).json();
+    expect(next.token).not.toBe(first.token);
+    const old = await t.app.inject({ method: 'POST', url: '/invites/resolve', headers: H(b), payload: { token: first.token } });
+    expect(old.statusCode).toBe(400); expect(old.json().error).toBe('INVITE_INVALID');
+    expect((await t.app.inject({ method: 'POST', url: '/invites/resolve', headers: H(b), payload: { token: next.token } })).json().user.username).toBe('priya.dsm');
+
+    const ws = (await t.app.inject({ method: 'POST', url: '/workspaces', headers: H(a), payload: { name: 'Hamlet UK Tour 2027' } })).json().workspace;
+    const wi = (await t.app.inject({ method: 'POST', url: '/invites', headers: H(a), payload: { kind: 'workspace', workspaceId: ws.id } })).json();
+    expect((await t.app.inject({ method: 'POST', url: '/invites/accept', headers: H(b), payload: { token: wi.token } })).json()).toMatchObject({ workspaceId: ws.id, alreadyMember: false });
+    const again = (await t.app.inject({ method: 'POST', url: '/invites/accept', headers: H(b), payload: { token: wi.token } })).json();
+    expect(again).toMatchObject({ workspaceId: ws.id, alreadyMember: true });
+    expect((await t.app.inject({ method: 'GET', url: `/workspaces/${ws.id}`, headers: H(b) })).json().workspace.memberCount).toBe(2);
+  });
+
+  it('escapes LIKE wildcards in workspace member search', async () => {
+    const t = setup();
+    const admin = await signup(t, 'sophie.sm');
+    grantPlan(t, admin, 'company');
+    const ws = (await t.app.inject({ method: 'POST', url: '/workspaces', headers: H(admin), payload: { name: 'Hamlet UK Tour 2027' } })).json().workspace;
+    t.ctx.db.prepare('INSERT INTO users (id, identifier_hash, identifier_kind, display_name, username, created_at) VALUES (?,?,?,?,?,?)')
+      .run('usr_pct', 'h_pct', 'phone', '100% extra', 'pct.user', Date.now());
+    t.ctx.db.prepare('INSERT INTO users (id, identifier_hash, identifier_kind, display_name, username, created_at) VALUES (?,?,?,?,?,?)')
+      .run('usr_norm', 'h_norm', 'phone', 'Normal Name', 'normal.user', Date.now());
+    t.joinWorkspace(ws.id, 'usr_pct', 'member', null);
+    t.joinWorkspace(ws.id, 'usr_norm', 'member', null);
+    const hit = (await t.app.inject({ method: 'GET', url: `/workspaces/${ws.id}/members?q=${encodeURIComponent('%')}`, headers: H(admin) })).json();
+    expect(hit.members.map((m: any) => m.username)).toEqual(['pct.user']);
+    expect(hit.total).toBe(1);
+  });
+
+  it('rate-limits search, messages, attachments, reports and invites', async () => {
+    const t = setup();
+    const a = await signup(t, 'sophie.sm'); const b = await signup(t, 'marcus.lx');
+    let last = 200;
+    for (let i = 0; i < 31; i++) last = (await t.app.inject({ method: 'GET', url: '/users/search?q=ab', headers: H(a) })).statusCode;
+    expect(last).toBe(429);
+
+    const conv = (await t.app.inject({ method: 'POST', url: '/conversations', headers: H(a), payload: { kind: 'direct', userId: b.id } })).json().conversation;
+    for (let i = 0; i < 40; i++) {
+      const r = await t.app.inject({ method: 'POST', url: `/conversations/${conv.id}/messages`, headers: H(a), payload: {} });
+      expect(r.statusCode).toBe(400);
+    }
+    expect((await t.app.inject({ method: 'POST', url: `/conversations/${conv.id}/messages`, headers: H(a), payload: {} })).statusCode).toBe(429);
+    expect((await t.app.inject({ method: 'POST', url: `/conversations/${conv.id}/messages`, headers: H(a), payload: {} })).json().error).toBe('RATE_LIMITED');
+
+    for (let i = 0; i < 20; i++) await t.app.inject({ method: 'POST', url: '/attachments', headers: H(a), payload: {} });
+    expect((await t.app.inject({ method: 'POST', url: '/attachments', headers: H(a), payload: {} })).statusCode).toBe(429);
+
+    for (let i = 0; i < 8; i++) {
+      const r = await t.app.inject({ method: 'POST', url: '/reports', headers: H(a), payload: { reportedId: b.id, reason: 'spam' } });
+      expect(r.statusCode).toBe(200);
+    }
+    expect((await t.app.inject({ method: 'POST', url: '/reports', headers: H(a), payload: { reportedId: b.id, reason: 'spam' } })).statusCode).toBe(429);
+
+    for (let i = 0; i < 15; i++) {
+      const r = await t.app.inject({ method: 'POST', url: '/invites', headers: H(a), payload: { kind: 'contact' } });
+      expect(r.statusCode).toBe(200);
+    }
+    expect((await t.app.inject({ method: 'POST', url: '/invites', headers: H(a), payload: { kind: 'contact' } })).statusCode).toBe(429);
+  });
+
+  it('writes audit_log entries for wrap and role changes', async () => {
+    const t = setup();
+    const admin = await signup(t, 'ops.admin'); t.ctx.db.prepare('UPDATE users SET is_admin=1 WHERE id=?').run(admin.id);
+    const a = await signup(t, 'sophie.sm'); const b = await signup(t, 'marcus.lx');
+    grantPlan(t, a, 'company');
+    const ws = (await t.app.inject({ method: 'POST', url: '/workspaces', headers: H(a), payload: { name: 'Hamlet UK Tour 2027' } })).json().workspace;
+    t.joinWorkspace(ws.id, b.id, 'member', null);
+    await t.app.inject({ method: 'PATCH', url: `/workspaces/${ws.id}/members/${b.id}`, headers: H(a), payload: { role: 'admin' } });
+    await t.app.inject({ method: 'POST', url: `/workspaces/${ws.id}/wrap`, headers: H(a) });
+    const g = (await t.app.inject({ method: 'POST', url: '/conversations', headers: H(a), payload: { kind: 'group', title: 'LX', memberIds: [b.id] } })).json().conversation;
+    await t.app.inject({ method: 'PATCH', url: `/conversations/${g.id}/members/${b.id}`, headers: H(a), payload: { role: 'admin' } });
+    const audit = (await t.app.inject({ method: 'GET', url: '/admin/audit', headers: H(admin) })).json();
+    expect(audit.entries.map((e: any) => e.action)).toEqual(expect.arrayContaining(['workspace.wrap', 'workspace.role_change', 'conversation.role_change']));
   });
 });

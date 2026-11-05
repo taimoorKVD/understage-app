@@ -89,28 +89,44 @@ function DocAtt({ m, att }: { m: LocalMessage; att: AttachmentRef }) {
   );
 }
 
-export function Bubble({ m, mine, senderName, group }: { m: LocalMessage; mine: boolean; senderName: string; group: boolean }) {
+function TextBody({ text }: { text: string }) {
+  const parts = text.split(/(@[a-zA-Z0-9._]+)/g);
+  return <T size={15.5} selectable style={{ lineHeight: 21 }}>{parts.map((p, i) => p.startsWith('@') ? <T key={i} size={15.5} style={{ color: C.gold, lineHeight: 21 }}>{p}</T> : p)}</T>;
+}
+
+export function Bubble({ m, mine, senderName, group, replyPreview, onReply, readByNames }: { m: LocalMessage; mine: boolean; senderName: string; group: boolean; replyPreview?: string; onReply?: () => void; readByNames?: string[] }) {
   const b = m.body;
   if (b?.type === 'system') return <View style={{ alignSelf: 'center', backgroundColor: C.pill, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4, marginVertical: 4 }}><T size={12} gold>{b.text}</T></View>;
   let inner: React.ReactNode;
   if (!b) inner = <Row gap={6}><Icon name="lock" size={13} color={C.muted} /><T mu size={14} style={{ fontStyle: 'italic' }}>Couldn’t decrypt — sent to an older key on this account</T></Row>;
-  else if (b.type === 'text') inner = <T size={15.5} selectable style={{ lineHeight: 21 }}>{b.text}</T>;
+  else if (b.type === 'text') inner = <TextBody text={b.text} />;
   else if (b.type === 'voice') inner = <Voice m={m} att={b.attachment} durationSec={b.durationSec} waveform={b.waveform} mine={mine} />;
   else if (b.type === 'image') inner = <ImageAtt m={m} att={b.attachment} caption={b.caption} w={b.width} h={b.height} />;
   else if (b.type === 'doc') inner = <DocAtt m={m} att={b.attachment} />;
   else inner = <Row gap={10}><Avatar name={b.displayName} size={34} /><View><T weight="700">{b.displayName}</T><T mu size={12}>@{b.username}</T></View></Row>;
-  const readLabel = mine && group && m.status === 'read' && m.recipients > 1 ? ` · Read by ${m.readBy}/${m.recipients}` : '';
+  let readLabel = '';
+  if (mine && group && m.status === 'read' && m.recipients > 1) {
+    if (readByNames?.length) {
+      const shown = readByNames.slice(0, 4);
+      const extra = readByNames.length - shown.length;
+      readLabel = ` · Read by ${shown.join(', ')}${extra > 0 ? ` +${extra}` : ''}`;
+    } else {
+      readLabel = ` · Read by ${m.readBy}/${m.recipients}`;
+    }
+  }
   const bubble = (
     <View testID={`msg-${m.clientId}`} style={{ maxWidth: '80%', alignSelf: mine ? 'flex-end' : 'flex-start', backgroundColor: mine ? C.sent : C.recv, borderRadius: 18, borderBottomRightRadius: mine ? 6 : 18, borderBottomLeftRadius: mine ? 18 : 6, paddingHorizontal: 12, paddingVertical: 8 }}>
       {group && !mine ? <T size={12} weight="700" style={{ color: avatarColor(senderName) }}>{senderName}</T> : null}
+      {replyPreview ? <View style={{ borderLeftWidth: 2, borderLeftColor: C.gold, paddingLeft: 8, marginBottom: 4 }}><T size={12} mu numberOfLines={2}>{replyPreview}</T></View> : null}
       {inner}
       <Row gap={4} style={{ alignSelf: 'flex-end', marginTop: 2 }}><T size={10.5} style={{ opacity: 0.65 }}>{clock(m.createdAt)}{readLabel}</T>{mine ? <Tick m={m} /> : null}</Row>
     </View>
   );
   const failed = mine && m.status === 'failed';
+  const body = onReply ? <Tap onLongPress={onReply}>{bubble}</Tap> : bubble;
   return (
     <View style={{ gap: 4 }}>
-      {group && !mine ? <Row gap={8} style={{ alignItems: 'flex-end' }}><Avatar name={senderName} size={28} />{bubble}</Row> : bubble}
+      {group && !mine ? <Row gap={8} style={{ alignItems: 'flex-end' }}><Avatar name={senderName} size={28} />{body}</Row> : body}
       {failed ? (
         <Row gap={14} style={{ alignSelf: 'flex-end' }}>
           <T size={12} style={{ color: '#ff8a9a', flexShrink: 1 }}>Not sent{m.error ? ` · ${m.error}` : ''}</T>

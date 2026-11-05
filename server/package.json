@@ -13,7 +13,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "smoke": "tsx scripts/smoke.ts",
-    "demo-crew": "tsx scripts/demo-crew.ts"
+    "demo-crew": "tsx scripts/demo-crew.ts",
+    "seed:hamlet-200": "tsx scripts/seed-hamlet-200.ts"
   },
   "keywords": [],
   "author": "",

@@ -1,5 +1,10 @@
 import React, { useEffect } from 'react';
-import { View } from 'react-native';
+import { View, LogBox } from 'react-native';
+LogBox.ignoreLogs([
+  'expo-notifications',
+  "A required entitlement isn't present",
+  'Keychain access failed',
+]);
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -30,6 +35,7 @@ export default function Root() {
         ) : (
           <>
             <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.bg }, animation: 'slide_from_right' }}>
+              <Stack.Screen name="mls-selftest" />
               <Stack.Protected guard={status === 'signedOut'}><Stack.Screen name="(auth)" /></Stack.Protected>
               <Stack.Protected guard={status === 'onboarding'}><Stack.Screen name="(onb)" /></Stack.Protected>
               <Stack.Protected guard={status === 'ready'}><Stack.Screen name="(app)" /></Stack.Protected>

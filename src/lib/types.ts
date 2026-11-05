@@ -2,6 +2,7 @@ export interface Shift { start: string; end: string; days: number[] }
 export interface PublicUser {
   id: string; displayName: string | null; username: string | null; role: string | null; department: string | null; avatar: string | null;
   identityKey: string | null; keyUpdatedAt: number | null; timezone: string; localTime: string; onShift: boolean; shift: Shift;
+  mlsSignaturePublicKey?: string | null; mlsCredentialIdentity?: string | null; mlsKeyUpdatedAt?: number | null;
 }
 export interface SelfUser extends PublicUser {
   identifierKind: 'phone' | 'email'; followPhoneTz: boolean; touringMode: boolean; quietHours: boolean; workMode: boolean; isAdmin: boolean;
@@ -10,12 +11,14 @@ export interface SelfUser extends PublicUser {
 export interface ServerMessage {
   id: string; seq: number; conversationId: string; senderId: string; clientId: string; kind: string; createdAt: number;
   nonce: string | null; ciphertext: string | null; status?: 'sent' | 'delivered' | 'read'; readBy: number; deliveredTo: number; recipients: number;
+  readByUserIds?: string[];
 }
 export interface Conversation {
   id: string; kind: 'direct' | 'group' | 'workspace'; title: string | null; workspaceId: string | null; readonly: boolean; createdAt: number;
   memberCount: number; myRole: string; lastReadSeq: number; unread: number; members: (PublicUser & { convRole: string })[];
   lastMessage: ServerMessage | null; workspace: { id: string; name: string; initial: string; wrapped: boolean } | null;
   lastAnnouncement: { title: string; createdAt: number } | null;
+  e2eeError?: string | null;
 }
 export interface Workspace {
   id: string; name: string; initial: string; venue: string; runLabel: string; seatLimit: number; plan: string; memberCount: number;

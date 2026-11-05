@@ -50,6 +50,9 @@ describe('realtime (Socket.IO)', () => {
     let leaked = false; sa.once('call:signal', () => { leaked = true; });
     sc.emit('call:signal', { callId: 'call-rt-1', data: { type: 'answer' } });
     await new Promise(r => setTimeout(r, 200)); expect(leaked).toBe(false);
+    let typed = false; sa.once('typing', () => { typed = true; });
+    sc.emit('typing', { conversationId: conv.id, to: [a.id] });
+    await new Promise(r => setTimeout(r, 200)); expect(typed).toBe(false);
     const ended = once(sa, 'call:ended'); sb.emit('call:end', { callId: 'call-rt-1' });
     expect((await ended).status).toBe('completed');
     const calls = (await built.app.inject({ method: 'GET', url: '/calls', headers: H(a) })).json().calls;
