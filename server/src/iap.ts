@@ -3,12 +3,11 @@ import { X509Certificate, verify as cryptoVerify } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const DEFAULT_BUNDLE_ID = process.env.APPLE_BUNDLE_ID || 'com.kvmac.understage';
+import { DEFAULT_IAP_BUNDLE_ID, PRODUCT_TO_PLAN as SHARED_PRODUCT_TO_PLAN, planFromProductId as sharedPlanFromProductId } from '../../shared/iap-products.js';
 
-export const PRODUCT_TO_PLAN: Record<string, 'production' | 'company'> = {
-  'com.understage.production.monthly': 'production',
-  'com.understage.company.monthly': 'company',
-};
+export const DEFAULT_BUNDLE_ID = process.env.APPLE_BUNDLE_ID || DEFAULT_IAP_BUNDLE_ID;
+
+export const PRODUCT_TO_PLAN: Record<string, 'production' | 'company'> = { ...SHARED_PRODUCT_TO_PLAN };
 
 export type AppleTransaction = {
   transactionId: string;
@@ -160,5 +159,5 @@ export function verifySignedTransaction(
 }
 
 export function planFromProductId(productId: string): 'production' | 'company' | null {
-  return PRODUCT_TO_PLAN[productId] || null;
+  return sharedPlanFromProductId(productId);
 }

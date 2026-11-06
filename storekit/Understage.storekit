@@ -1,0 +1,78 @@
+{
+  "identifier": "UnderstageLocal",
+  "nonRenewingSubscriptions": [],
+  "products": [],
+  "settings": {
+    "_failTransactionsEnabled": false,
+    "_locale": "en_GB",
+    "_storefront": "GBR",
+    "_storeKitErrors": []
+  },
+  "subscriptionGroups": [
+    {
+      "id": "understage_plans",
+      "localizations": [],
+      "name": "Understage Plans",
+      "subscriptions": [
+        {
+          "adHocOffers": [],
+          "codeOffers": [],
+          "displayPrice": "49.00",
+          "familyShareable": false,
+          "groupNumber": 1,
+          "internalID": "local_production_monthly",
+          "introductoryOffer": {
+            "displayPrice": "0",
+            "internalID": "local_production_trial",
+            "numberOfPeriods": 1,
+            "paymentMode": "free",
+            "subscriptionPeriod": "P2W"
+          },
+          "localizations": [
+            {
+              "description": "Workspace up to 50 people",
+              "displayName": "Production",
+              "locale": "en_GB"
+            }
+          ],
+          "productID": "com.understage.production.monthly",
+          "recurringSubscriptionPeriod": "P1M",
+          "referenceName": "Production Monthly",
+          "subscriptionGroupID": "understage_plans",
+          "type": "RecurringSubscription"
+        },
+        {
+          "adHocOffers": [],
+          "codeOffers": [],
+          "displayPrice": "149.00",
+          "familyShareable": false,
+          "groupNumber": 2,
+          "internalID": "local_company_monthly",
+          "introductoryOffer": {
+            "displayPrice": "0",
+            "internalID": "local_company_trial",
+            "numberOfPeriods": 1,
+            "paymentMode": "free",
+            "subscriptionPeriod": "P2W"
+          },
+          "localizations": [
+            {
+              "description": "Up to 200 people + admin tools",
+              "displayName": "Company",
+              "locale": "en_GB"
+            }
+          ],
+          "productID": "com.understage.company.monthly",
+          "recurringSubscriptionPeriod": "P1M",
+          "referenceName": "Company Monthly",
+          "subscriptionGroupID": "understage_plans",
+          "type": "RecurringSubscription"
+        }
+      ]
+    }
+  ],
+  "version": {
+    "major": 3,
+    "minor": 0
+  }
+}
