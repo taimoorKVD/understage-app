@@ -137,6 +137,17 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
 
+CREATE TABLE IF NOT EXISTS iap_transactions (
+  transaction_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  original_transaction_id TEXT NOT NULL,
+  product_id TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  environment TEXT,
+  verified_at INTEGER NOT NULL
+);
+CREATE INDEX idx_iap_original_user ON iap_transactions(original_transaction_id, user_id);
+
 CREATE TABLE IF NOT EXISTS mls_key_packages (
   hash_ref TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

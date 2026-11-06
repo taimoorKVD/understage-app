@@ -15,7 +15,7 @@ export type AppleTransaction = {
   bundleId: string;
   productId: string;
   purchaseDate?: number;
-  expiresDate?: number;
+  expiresDate: number;
   environment?: string;
   type?: string;
 };
@@ -42,7 +42,7 @@ function splitPemBundle(pem: string): string[] {
 export function loadTrustedRootPems(): string[] {
   const pems: string[] = [];
   if (process.env.APPLE_ROOT_CA_PEM) pems.push(...splitPemBundle(process.env.APPLE_ROOT_CA_PEM));
-  const dir = process.env.APPLE_IAP_ROOTS_DIR;
+  const dir = process.env.NODE_ENV === 'production' ? undefined : process.env.APPLE_IAP_ROOTS_DIR;
   if (dir && existsSync(dir)) {
     for (const name of readdirSync(dir)) {
       if (!/\.(pem|crt|cer|cert)$/i.test(name)) continue;
@@ -139,8 +139,14 @@ export function verifySignedTransaction(
   const okSig = cryptoVerify('SHA256', parsed.signingInput, { key: certs[0].publicKey, dsaEncoding: 'ieee-p1363' }, parsed.signature);
   if (!okSig) return { ok: false, code: 'BAD_SIGNATURE', error: 'JWS signature does not match the leaf certificate' };
   const payload = parsed.payload;
-  if (!payload || typeof payload.transactionId !== 'string' || typeof payload.bundleId !== 'string' || typeof payload.productId !== 'string') {
-    return { ok: false, code: 'INVALID_PAYLOAD', error: 'Transaction payload missing transactionId, bundleId, or productId' };
+  if (
+    !payload || typeof payload.transactionId !== 'string' ||
+    typeof payload.originalTransactionId !== 'string' ||
+    typeof payload.bundleId !== 'string' || typeof payload.productId !== 'string' ||
+    typeof payload.expiresDate !== 'number' || !Number.isFinite(payload.expiresDate) ||
+    payload.expiresDate <= 0
+  ) {
+    return { ok: false, code: 'INVALID_PAYLOAD', error: 'Transaction payload must include transaction, family, product, and auto-renewable subscription expiry' };
   }
   if (opts.expectedBundleId && payload.bundleId !== opts.expectedBundleId) {
     return { ok: false, code: 'BUNDLE_MISMATCH', error: 'bundleId does not match this app' };
@@ -153,7 +159,7 @@ export function verifySignedTransaction(
       bundleId: payload.bundleId,
       productId: payload.productId,
       purchaseDate: typeof payload.purchaseDate === 'number' ? payload.purchaseDate : undefined,
-      expiresDate: typeof payload.expiresDate === 'number' ? payload.expiresDate : undefined,
+      expiresDate: payload.expiresDate,
       environment: typeof payload.environment === 'string' ? payload.environment : undefined,
       type: typeof payload.type === 'string' ? payload.type : undefined,
     },

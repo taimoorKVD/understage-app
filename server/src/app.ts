@@ -127,7 +127,9 @@ export function buildApp(opts: Omit<Partial<Ctx>, 'cfg'> & { cfg?: Partial<Confi
     const u = getUser(userId);
     const plan = PLANS.find(p => p.id === u.plan) || PLANS[0];
     const status = u.plan_status as string | null;
-    const expired = status === 'expired' || status === 'cancelled' || (!!u.plan_renews_at && u.plan_renews_at < ctx.clock() && status === 'trial');
+    const expired = (status === 'active' || status === 'trial') && typeof u.plan_renews_at === 'number'
+      ? u.plan_renews_at <= ctx.clock()
+      : status === 'expired' || status === 'cancelled';
     if (plan.id === 'free' || plan.seats <= 0 || expired) return { id: 'free' as const, seats: 0, status: expired ? 'expired' : status };
     return { id: plan.id as 'production' | 'company' | 'free', seats: plan.seats, status };
   };
@@ -837,7 +839,16 @@ export function buildApp(opts: Omit<Partial<Ctx>, 'cfg'> & { cfg?: Partial<Confi
     const ws = db.prepare("SELECT w.* FROM workspaces w JOIN workspace_members m ON m.workspace_id=w.id WHERE m.user_id=? AND m.role IN ('owner','admin') AND w.wrapped_at IS NULL LIMIT 1").get(req.userId) as any;
     const seats = ws ? (db.prepare('SELECT COUNT(*) n FROM workspace_members WHERE workspace_id=?').get(ws.id) as any).n : 0;
     const plan = PLANS.find(p => p.id === u.plan) || PLANS[0];
-    return { plan, status: u.plan_status, renewsAt: u.plan_renews_at, seatsUsed: seats, seatLimit: plan.seats };
+    const effective = entitledPlan(req.userId);
+    const expired = effective.status === 'expired';
+    const effectivePlan = expired ? PLANS[0] : plan;
+    return {
+      plan: effectivePlan,
+      status: expired ? 'expired' : u.plan_status,
+      renewsAt: u.plan_renews_at,
+      seatsUsed: seats,
+      seatLimit: expired ? 0 : effectivePlan.seats,
+    };
   });
   app.post('/subscriptions/verify', { preHandler: auth }, async req => {
     const b = z.object({
@@ -870,12 +881,45 @@ export function buildApp(opts: Omit<Partial<Ctx>, 'cfg'> & { cfg?: Partial<Confi
       throw new HttpError(400, 'IAP_UNVERIFIED', 'transactionId does not match the signed transaction');
     }
     const exp = verified.transaction.expiresDate;
-    if (typeof exp === 'number' && exp <= ctx.clock()) {
+    if (exp <= ctx.clock()) {
       throw new HttpError(400, 'IAP_EXPIRED', 'Signed transaction is expired');
     }
-    const renews = typeof exp === 'number' ? exp : ctx.clock() + 14 * DAY;
-    db.prepare("UPDATE users SET plan=?, plan_status='active', plan_renews_at=? WHERE id=?").run(planId, renews, req.userId);
-    return { ok: true, planId, status: 'active', renewsAt: renews, environment: verified.transaction.environment || null };
+    const tx = verified.transaction;
+    const accept = db.transaction(() => {
+      const owned = db.prepare('SELECT * FROM iap_transactions WHERE transaction_id=?').get(tx.transactionId) as any;
+      if (owned && owned.user_id !== req.userId) {
+        throw new HttpError(409, 'IAP_TRANSACTION_OWNED', 'This App Store transaction is already bound to another account');
+      }
+      if (owned && (
+        owned.original_transaction_id !== tx.originalTransactionId ||
+        owned.product_id !== tx.productId || owned.expires_at !== exp
+      )) {
+        throw new HttpError(409, 'IAP_TRANSACTION_MISMATCH', 'Signed transaction does not match the accepted subscription record');
+      }
+      const familyOwner = db.prepare(
+        'SELECT user_id FROM iap_transactions WHERE original_transaction_id=? LIMIT 1',
+      ).get(tx.originalTransactionId) as any;
+      if (familyOwner && familyOwner.user_id !== req.userId) {
+        throw new HttpError(409, 'IAP_TRANSACTION_OWNED', 'This App Store subscription is already bound to another account');
+      }
+      const priorFamily = db.prepare(
+        'SELECT original_transaction_id, MAX(expires_at) AS expires_at FROM iap_transactions WHERE user_id=?',
+      ).get(req.userId) as any;
+      db.prepare(`INSERT INTO iap_transactions (
+        transaction_id, user_id, original_transaction_id, product_id, expires_at, environment, verified_at
+      ) VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(transaction_id) DO NOTHING
+      `).run(tx.transactionId, req.userId, tx.originalTransactionId, tx.productId, exp, tx.environment ?? null, ctx.clock());
+      const renewed = priorFamily?.original_transaction_id === tx.originalTransactionId ? priorFamily.expires_at : exp;
+      const current = getUser(req.userId);
+      if (current.plan_renews_at !== null && current.plan_renews_at > renewed && entitledPlan(req.userId).id !== 'free') {
+        return { planId: current.plan, renewsAt: current.plan_renews_at };
+      }
+      db.prepare("UPDATE users SET plan=?, plan_status='active', plan_renews_at=? WHERE id=?").run(planId, renewed, req.userId);
+      return { planId, renewsAt: renewed };
+    });
+    const result = accept.immediate();
+    return { ok: true, planId: result.planId, status: 'active', renewsAt: result.renewsAt, environment: tx.environment || null };
   });
 
   // ---------- support tickets (user side)
