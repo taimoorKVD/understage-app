@@ -29,6 +29,7 @@ fi
 cd "$RUST"
 
 echo "==> host lib + uniffi-bindgen"
+cargo build --release --lib --features bindgen
 cargo build --release --features bindgen --bin uniffi-bindgen
 
 DYLIB=""

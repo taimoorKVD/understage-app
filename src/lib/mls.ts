@@ -1,8 +1,8 @@
 /**
  * App-facing TypeScript API for the local `understage-mls` Expo module.
  *
- * Phase 1 only: this file does not replace `src/lib/crypto.ts` or the
- * existing TweetNaCl send path. Production message send/receive is unchanged.
+ * The TypeScript MLS APIs remain feature-flagged off by default. Native
+ * credentials and KeyPackages are published only when the directory is enabled.
  */
 import { requireNativeModule } from 'expo-modules-core';
 import { api } from './api';
@@ -36,6 +36,7 @@ type UnderstageMlsNative = {
   openSession(storagePath: string): Promise<string>;
   closeSession(sessionId: string): Promise<void>;
   generateCredential(sessionId: string, identity: string): Promise<void>;
+  signaturePublicKey(sessionId: string): Promise<string>;
   exportKeyPackage(sessionId: string): Promise<string>;
   createGroup(sessionId: string): Promise<string>;
   addMember(sessionId: string, keyPackageB64: string): Promise<MlsAddMemberResult>;
@@ -79,6 +80,10 @@ export async function mlsGenerateCredential(sessionId: string, identity: string)
   await native().generateCredential(sessionId, identity);
 }
 
+export async function mlsSignaturePublicKey(sessionId: string): Promise<string> {
+  return native().signaturePublicKey(sessionId);
+}
+
 export async function mlsExportKeyPackage(sessionId: string): Promise<string> {
   return native().exportKeyPackage(sessionId);
 }
@@ -116,8 +121,8 @@ export async function mlsEpoch(sessionId: string): Promise<number> {
 }
 
 /**
- * Dev-only two-member in-process round trip: Alice creates a group, adds Bob
- * via Welcome, they encrypt and decrypt application messages both ways.
+ * Dev-only three-member native round trip: Alice adds Bob and Charlie via
+ * Welcomes, credentials persist, then Bob loses access at the removal epoch.
  */
 export async function runMlsSelfTest(): Promise<MlsSelfTestResult> {
   if (!__DEV__) {
@@ -125,31 +130,57 @@ export async function runMlsSelfTest(): Promise<MlsSelfTestResult> {
   }
   let alice: string | null = null;
   let bob: string | null = null;
+  let charlie: string | null = null;
+  let step = 'check native availability';
   try {
     if (!mlsAvailable()) {
       return { ok: false, detail: 'UnderstageMls native module is not available.' };
     }
+    step = 'read ciphersuite';
     const suite = mlsCiphersuiteName();
     if (suite !== 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519') {
       return { ok: false, detail: `unexpected ciphersuite: ${suite}` };
     }
+    step = 'resolve documents directory';
     const root = mlsDocumentsDirectory().replace(/\/+$/, '');
     const dir = `${root}/mls-selftest/${Date.now()}`;
+    step = 'open identity vaults';
     alice = await mlsOpenSession(`${dir}/alice.sqlite`);
     bob = await mlsOpenSession(`${dir}/bob.sqlite`);
+    charlie = await mlsOpenSession(`${dir}/charlie.sqlite`);
+    step = 'generate credentials';
     await mlsGenerateCredential(alice, 'alice');
     await mlsGenerateCredential(bob, 'bob');
+    await mlsGenerateCredential(charlie, 'charlie');
+    step = 'export signature keys';
+    const aliceKey = await mlsSignaturePublicKey(alice);
+    const bobKey = await mlsSignaturePublicKey(bob);
+    const charlieKey = await mlsSignaturePublicKey(charlie);
+    if (
+      aliceKey.length !== 44 || bobKey.length !== 44 || charlieKey.length !== 44 ||
+      new Set([aliceKey, bobKey, charlieKey]).size !== 3
+    ) {
+      return { ok: false, detail: 'signature public-key export failed' };
+    }
+    step = 'create group and add Bob';
     const bobKp = await mlsExportKeyPackage(bob);
     await mlsCreateGroup(alice);
     const added = await mlsAddMember(alice, bobKp);
     const bobEpoch = await mlsJoinFromWelcome(bob, added.welcome);
+    const charlieAdded = await mlsAddMember(alice, await mlsExportKeyPackage(charlie));
+    const bobCharlie = await mlsProcessIncoming(bob, charlieAdded.commit);
+    const charlieEpoch = await mlsJoinFromWelcome(charlie, charlieAdded.welcome);
     const aliceEpoch = await mlsEpoch(alice);
-    if (bobEpoch !== added.epoch || aliceEpoch !== bobEpoch) {
+    if (
+      bobEpoch !== added.epoch || aliceEpoch !== charlieAdded.epoch ||
+      bobCharlie.epoch !== aliceEpoch || charlieEpoch !== aliceEpoch
+    ) {
       return {
         ok: false,
-        detail: `epoch mismatch: alice=${aliceEpoch} bob=${bobEpoch} added=${added.epoch}`,
+        detail: `epoch mismatch: alice=${aliceEpoch} bob=${bobCharlie.epoch} charlie=${charlieEpoch}`,
       };
     }
+    step = 'bidirectional encrypted messaging';
     const hello = await mlsEncrypt(alice, 'hello from alice');
     const helloPt = await mlsDecrypt(bob, hello);
     if (helloPt !== 'hello from alice') {
@@ -160,19 +191,73 @@ export async function runMlsSelfTest(): Promise<MlsSelfTestResult> {
     if (replyPt !== 'hello from bob') {
       return { ok: false, detail: `Alice decrypted ${JSON.stringify(replyPt)}` };
     }
+    step = 'reload persisted identity and group';
+    await mlsCloseSession(alice);
+    await mlsCloseSession(bob);
+    bob = null;
+    await mlsCloseSession(charlie);
+    charlie = null;
+    step = 'open identity vaults';
+    alice = await mlsOpenSession(`${dir}/alice.sqlite`);
+    bob = await mlsOpenSession(`${dir}/bob.sqlite`);
+    charlie = await mlsOpenSession(`${dir}/charlie.sqlite`);
+    if (
+      await mlsSignaturePublicKey(alice) !== aliceKey ||
+      await mlsSignaturePublicKey(bob) !== bobKey ||
+      await mlsSignaturePublicKey(charlie) !== charlieKey
+    ) {
+      return { ok: false, detail: 'native identity vault changed after reload' };
+    }
+    const persisted = await mlsEncrypt(alice, 'persisted identity and group');
+    if (await mlsDecrypt(bob, persisted) !== 'persisted identity and group' || await mlsDecrypt(charlie, persisted) !== 'persisted identity and group') {
+      return { ok: false, detail: 'reloaded native identity could not decrypt its group' };
+    }
+    step = 'remove Bob and verify new-epoch isolation';
+    const removed = await mlsRemoveMember(alice, 'bob');
+    const caughtUp = await mlsProcessIncoming(bob, removed.commit);
+    const remaining = await mlsProcessIncoming(charlie, removed.commit);
+    if (caughtUp.kind !== 'commit' || remaining.kind !== 'commit' || remaining.epoch !== removed.epoch) {
+      return { ok: false, detail: 'removal Commit did not advance both member epochs' };
+    }
+    const sealed = await mlsEncrypt(alice, 'new epoch');
+    if (await mlsDecrypt(charlie, sealed) !== 'new epoch') {
+      return { ok: false, detail: 'remaining member could not decrypt at new epoch' };
+    }
+    let removedFailed = false;
+    try { await mlsDecrypt(bob, sealed); } catch { removedFailed = true; }
+    let removedCannotWrite = false;
+    try { await mlsEncrypt(bob, 'must fail'); } catch { removedCannotWrite = true; }
+    if (!removedFailed || !removedCannotWrite) {
+      return { ok: false, detail: 'removed member retained group read/write access' };
+    }
     return {
       ok: true,
-      detail: `${suite} · epoch ${aliceEpoch} · Alice ↔ Bob application messages`,
+      detail: `${suite} · epochs ${aliceEpoch}→${caughtUp.epoch} · Alice ↔ Bob · persisted vault · signature export · removal`,
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, detail: message };
+    let message = 'Unknown native MLS error';
+    try {
+      if (typeof err === 'object' && err !== null && 'message' in err) {
+        const candidate = (err as { message?: unknown }).message;
+        if (typeof candidate === 'string') message = candidate;
+      } else if (typeof err === 'string') {
+        message = err;
+      } else {
+        message = JSON.stringify(err);
+      }
+    } catch {
+      message = 'Native MLS invocation failed without a serializable error';
+    }
+    return { ok: false, detail: `${step}: ${message}` };
   } finally {
     if (alice) {
       await mlsCloseSession(alice).catch(() => undefined);
     }
     if (bob) {
       await mlsCloseSession(bob).catch(() => undefined);
+    }
+    if (charlie) {
+      await mlsCloseSession(charlie).catch(() => undefined);
     }
   }
 }
@@ -195,10 +280,8 @@ export type MlsPublishResult = {
  * batch of KeyPackages plus one last-resort package. No-ops unless the feature
  * flag is on and the native module is present. Does not change the nacl send path.
  *
- * The current native module does not export the Ed25519 signature public key
- * (exporting it would require a UniFFI API change and a native rebuild, which
- * Phase 2 was asked not to do without reporting back first). KeyPackages are
- * still published; PUT /me/mls/credential can be called once that export exists.
+ * The Ed25519 signature public key comes from the native credential; the full
+ * identity is published before KeyPackages so readiness has cryptographic proof.
  */
 function fileExists(path: string): boolean {
   try {
@@ -236,6 +319,8 @@ export async function publishMlsKeyPackagesAfterKeygen(userId: string): Promise<
     if (!fileExists(`${sessionPath}.vault`)) {
       await mlsGenerateCredential(session, userId);
     }
+    const signaturePublicKey = await mlsSignaturePublicKey(session);
+    await api('PUT', '/me/mls/credential', { signaturePublicKey, credentialIdentity: userId });
     const now = Date.now();
     const notBefore = now - 60 * 60 * 1000;
     const notAfter = notBefore + MLS_KEY_PACKAGE_LIFETIME_MS;

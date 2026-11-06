@@ -255,6 +255,13 @@ pub struct MlsSession {
 
 #[uniffi::export]
 impl MlsSession {
+    #[uniffi::method]
+    pub fn signature_public_key(&self) -> Result<Vec<u8>, MlsError> {
+        let inner = self.inner.lock().map_err(|e| MlsError::failed(e.to_string()))?;
+        let (_cred, signer) = inner.require_identity()?;
+        Ok(signer.public().to_vec())
+    }
+
     #[uniffi::constructor]
     pub fn open(storage_path: String, wrapping_key: Vec<u8>) -> Result<std::sync::Arc<Self>, MlsError> {
         if wrapping_key.len() != 32 {

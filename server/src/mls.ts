@@ -309,6 +309,10 @@ export function registerMlsRoutes(app: FastifyInstance, ctx: Ctx, deps: MlsRoute
         const welcomes = [];
         for (const w of b.welcomes) {
           getUser(w.recipientId);
+          memberOf(conversationId, w.recipientId);
+          if (w.recipientId === req.userId) {
+            throw new HttpError(400, 'WELCOME_SELF', 'A group creator cannot Welcome itself');
+          }
           const welcomeId = uid('mlsw_');
           // Persist in the same transaction as the Commit. Welcome is never
           // visible until this transaction commits (OpenMLS book: do not
@@ -364,15 +368,18 @@ export function registerMlsRoutes(app: FastifyInstance, ctx: Ctx, deps: MlsRoute
       after_id: z.string().optional(),
     }).parse(req.query);
     const afterEpoch = q.after_epoch ?? -1;
+    const originator = db.prepare('SELECT sender_id FROM mls_messages WHERE conversation_id=? ORDER BY epoch ASC, created_at ASC, rowid ASC LIMIT 1').get(conversationId) as any;
+    const firstWelcome = db.prepare('SELECT epoch FROM mls_welcomes WHERE conversation_id=? AND recipient_id=? ORDER BY epoch ASC, created_at ASC, id ASC LIMIT 1').get(conversationId, req.userId) as any;
+    const earliestCommit = firstWelcome?.epoch ?? -1;
     const group = db.prepare('SELECT * FROM mls_groups WHERE conversation_id=?').get(conversationId) as any;
 
     const commits = db.prepare(`
       SELECT * FROM mls_messages
-      WHERE conversation_id=? AND kind='commit' AND (
+      WHERE conversation_id=? AND kind='commit' AND epoch >= ? AND (
         epoch > ? OR (epoch = ? AND ? IS NOT NULL AND id > ?)
       )
       ORDER BY epoch ASC, created_at ASC, id ASC
-    `).all(conversationId, afterEpoch, afterEpoch, q.after_id ?? null, q.after_id ?? '') as any[];
+    `).all(conversationId, earliestCommit, afterEpoch, afterEpoch, q.after_id ?? null, q.after_id ?? '') as any[]
 
     const welcomes = db.prepare(`
       SELECT * FROM mls_welcomes
@@ -382,20 +389,20 @@ export function registerMlsRoutes(app: FastifyInstance, ctx: Ctx, deps: MlsRoute
       ORDER BY epoch ASC, created_at ASC, id ASC
     `).all(conversationId, req.userId, afterEpoch, afterEpoch, q.after_id ?? null, q.after_id ?? '') as any[];
 
-    // Commits always precede their Welcomes at the same epoch so a joiner
-    // never processes a Welcome first.
+    // A Welcome joins the post-Commit state and is ordered first. Clients
+    // skip only that matched Commit, not subsequent epoch transitions.
     type Item = { sortEpoch: number; sortKind: number; createdAt: number; id: string; payload: Record<string, unknown> };
     const items: Item[] = [
       ...commits.map(row => ({
         sortEpoch: row.epoch as number,
-        sortKind: 0,
+        sortKind: 1,
         createdAt: row.created_at as number,
         id: row.id as string,
         payload: serializeCommit(row)!,
       })),
       ...welcomes.map(row => ({
         sortEpoch: row.epoch as number,
-        sortKind: 1,
+        sortKind: 0,
         createdAt: row.created_at as number,
         id: row.id as string,
         payload: serializeWelcome(row),
@@ -410,7 +417,7 @@ export function registerMlsRoutes(app: FastifyInstance, ctx: Ctx, deps: MlsRoute
 
     return {
       group: group
-        ? { conversationId, groupId: group.group_id, epoch: group.epoch }
+        ? { conversationId, groupId: group.group_id, epoch: group.epoch, founderId: originator?.sender_id ?? null }
         : { conversationId, groupId: conversationId, epoch: null },
       messages: items.map(i => i.payload),
     };

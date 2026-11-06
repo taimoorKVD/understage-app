@@ -48,7 +48,7 @@ async function establishMls(t: ReturnType<typeof setup>, founder: TUser, cid: st
     method: 'POST', url: `/conversations/${cid}/mls/commits`, headers: H(founder),
     payload: { epoch: 0, commit: b64('commit-epoch-0'), welcomes },
   });
-  expect(posted.statusCode).toBe(200);
+  expect(posted.statusCode, JSON.stringify(posted.json())).toBe(200);
   return posted.json() as { epoch: number; commitId: string; groupId: string };
 }
 
@@ -60,7 +60,8 @@ describe('MLS application messages (Phase 3)', () => {
     await publishReady(t, a);
     await publishReady(t, b);
     const cid = await openDirect(t, a, b);
-    await establishMls(t, a, cid, [{ recipientId: b.id, body: b64('welcome-b') }]);
+    const [founder, joiner] = [a, b].sort((x, y) => x.id < y.id ? -1 : 1);
+    await establishMls(t, founder, cid, [{ recipientId: joiner.id, body: b64('welcome-b') }]);
 
     const body = b64('mls-app:hello-from-a');
     const sent = await t.app.inject({
@@ -142,10 +143,10 @@ describe('MLS application messages (Phase 3)', () => {
 
   it('is idempotent on clientId for MLS just like nacl', async () => {
     const t = setupMls();
-    const a = await signup(t, 'mls.idem.a');
-    const b = await signup(t, 'mls.idem.b');
+    const a = await signup(t, 'mls.aaa.idem');
+    const b = await signup(t, 'mls.zzz.idem');
     const cid = await openDirect(t, a, b);
-    await establishMls(t, a, cid);
+    await establishMls(t, [a, b].sort((x, y) => x.id < y.id ? -1 : 1)[0], cid);
     const payload = { clientId: 'mls-idem-0001', protocol: 'mls', ciphertext: b64('once') };
     const first = await t.app.inject({ method: 'POST', url: `/conversations/${cid}/messages`, headers: H(a), payload });
     const second = await t.app.inject({ method: 'POST', url: `/conversations/${cid}/messages`, headers: H(a), payload });
@@ -207,10 +208,8 @@ describe('MLS group size vs nacl cap', () => {
     expect(create.json().conversation.memberCount).toBe(55);
     expect(create.json().conversation.e2eeError).toBe('GROUP_TOO_LARGE_FOR_E2EE');
 
-    await establishMls(t, owner, cid, [
-      { recipientId: b.id, body: b64('w-b') },
-      { recipientId: c.id, body: b64('w-c') },
-    ]);
+    const invited = [b.id, c.id, ...extras].filter(id => id !== owner.id);
+    await establishMls(t, owner, cid, invited.map(id => ({ recipientId: id, body: b64(`welcome-${id}`) })));
 
     const refreshed = await t.app.inject({ method: 'GET', url: `/conversations/${cid}`, headers: H(owner) });
     expect(refreshed.json().conversation.e2eeError).toBeNull();

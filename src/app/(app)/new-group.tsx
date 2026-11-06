@@ -8,9 +8,11 @@ import { api, errMsg } from '../../lib/api';
 import { createGroup, refreshConversation } from '../../lib/engine';
 import { useApp } from '../../store/app';
 import type { PublicUser } from '../../lib/types';
+import { addMlsGroupMembers } from '../../lib/mls-session';
 
 export default function NewGroup() {
   const { addTo } = useLocalSearchParams<{ addTo?: string }>();
+  const me = useApp(st => st.me);
   const conv = useApp(st => (addTo ? st.conversations[addTo] : undefined)); const existing = conv?.members.map(m => m.id) ?? [];
   const [contacts, setContacts] = useState<PublicUser[] | null>(null); const [sel, setSel] = useState<string[]>([]); const [title, setTitle] = useState('');
   const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
@@ -20,7 +22,7 @@ export default function NewGroup() {
   const go = async () => {
     setBusy(true); setErr(null);
     try {
-      if (addTo) { await api('POST', `/conversations/${addTo}/members`, { userIds: sel }); await refreshConversation(addTo); router.back(); }
+      if (addTo) { await addMlsGroupMembers(addTo, sel, me?.id ?? ''); router.back(); }
       else router.replace(`/chat/${await createGroup(title.trim(), sel)}`);
     } catch (e) { setErr(errMsg(e)); } finally { setBusy(false); }
   };

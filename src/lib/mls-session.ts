@@ -89,14 +89,15 @@ async function ensureIdentity(userId: string) {
 }
 
 async function openGroupSession(userId: string, conversationId: string): Promise<string> {
-  const cached = groupSessions.get(conversationId);
+  const cacheKey = `${userId}/${conversationId}`;
+  const cached = groupSessions.get(cacheKey);
   if (cached) return cached;
   await ensureIdentity(userId);
   const dest = mlsGroupStorePath(userId, conversationId);
   ensureDir(dest);
   copyFile(vaultPath(mlsIdentityStorePath(userId)), vaultPath(dest));
   const session = await mlsOpenSession(dest);
-  groupSessions.set(conversationId, session);
+  groupSessions.set(cacheKey, session);
   return session;
 }
 
@@ -109,6 +110,7 @@ export async function closeAllMlsSessions() {
 type MlsWire = {
   kind: 'commit' | 'welcome';
   body: string;
+  epoch: number;
   recipientId?: string;
 };
 
@@ -128,27 +130,37 @@ export async function catchUpMls(userId: string, conversationId: string): Promis
   } catch {
     localEpoch = -1;
   }
-  const { group, messages } = await fetchMls(conversationId, localEpoch);
+  const { group, messages } = await fetchMls(conversationId, localEpoch < 0 ? -1 : localEpoch - 1);
+  let joinedAt: number | null = null;
   for (const msg of messages) {
     if (msg.kind === 'welcome') {
-      try {
-        await mlsJoinFromWelcome(session, msg.body);
-      } catch {
-        // already joined this group
+      if (localEpoch < 0) {
+        const epoch = await mlsJoinFromWelcome(session, msg.body);
+        localEpoch = epoch;
+        joinedAt = epoch;
       }
     } else if (msg.kind === 'commit') {
-      try {
-        await mlsProcessIncoming(session, msg.body);
-      } catch {
-        // commit already merged or not applicable yet
-      }
+      // A Welcome is the group's post-Commit snapshot. Skip its matched
+      // Commit; any earlier Commit is already represented by that Welcome.
+      // A later historical Welcome cannot replace the current local group.
+      if (joinedAt !== null && msg.epoch < joinedAt) continue;
+      if (msg.epoch + 1 === localEpoch) continue;
+      if (localEpoch < 0) throw new Error('MLS group requires its Welcome before a Commit');
+      localEpoch = await mlsEpoch(session);
+      const processed = await mlsProcessIncoming(session, msg.body);
+      if (processed.epoch !== msg.epoch + 1) throw new Error(`MLS Commit produced epoch ${processed.epoch}, expected ${msg.epoch + 1}`);
+      localEpoch = processed.epoch;
     }
   }
-  try {
-    return await mlsEpoch(session);
-  } catch {
-    return group.epoch;
+  if (!(await hasLocalGroup(session))) {
+    if (group.epoch != null) throw new Error('MLS group exists but no Welcome for this account is available');
+    return null;
   }
+  const epoch = await mlsEpoch(session);
+  if (group.epoch != null && epoch !== group.epoch) {
+    throw new Error(`MLS catch-up incomplete: local epoch ${epoch}, server epoch ${group.epoch}`);
+  }
+  return epoch;
 }
 
 async function hasLocalGroup(session: string) {
@@ -199,11 +211,13 @@ export async function ensureMlsGroup(conv: Conversation, userId: string): Promis
   }
 }
 
-export async function reconcileMlsMembership(conv: Conversation, userId: string): Promise<void> {
+export async function reconcileMlsMembership(conv: Conversation, userId: string, memberIds?: string[]): Promise<void> {
   if (!conversationCanUseMls(conv)) return;
   const session = await openGroupSession(userId, conv.id);
   if (!(await hasLocalGroup(session))) return;
-  const others = conv.members.filter(m => m.id !== userId);
+  await catchUpMls(userId, conv.id);
+  if (conv.myRole !== 'admin' && conv.myRole !== 'owner') throw new Error('Only a group admin can add members');
+  const others = conv.members.filter(m => m.id !== userId && (!memberIds || memberIds.includes(m.id)));
   for (const member of others) {
     try {
       const kp = await api<{ ciphertext: string }>('GET', `/users/${member.id}/key-package`);
@@ -213,8 +227,10 @@ export async function reconcileMlsMembership(conv: Conversation, userId: string)
         commit: added.commit,
         welcomes: [{ recipientId: member.id, body: added.welcome }],
       });
-    } catch {
-      // already a member, no KeyPackage, or another commit won the epoch
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 409)) throw err;
+      await catchUpMls(userId, conv.id);
+      throw new Error('MLS membership changed — retry the group update');
     }
   }
 }
@@ -242,9 +258,40 @@ export async function removeMlsMember(conv: Conversation, userId: string, member
   if (!conversationCanUseMls(conv)) return;
   const session = await openGroupSession(userId, conv.id);
   const removed = await mlsRemoveMember(session, memberId);
-  await api('POST', `/conversations/${conv.id}/mls/commits`, {
-    epoch: Math.max(removed.epoch - 1, 0),
-    commit: removed.commit,
-    welcomes: [],
-  });
+  try {
+    await api('POST', `/conversations/${conv.id}/mls/commits`, {
+      epoch: Math.max(removed.epoch - 1, 0),
+      commit: removed.commit,
+      welcomes: [],
+    });
+  } catch (err) {
+    // Roster cannot be changed after a failed cryptographic Remove. A competing
+    // accepted commit is resynchronizable; all other failures need a new local epoch.
+    if (err instanceof ApiError && err.status === 409) {
+      await catchUpMls(userId, conv.id);
+      await removeMlsMember(conv, userId, memberId);
+      return;
+    }
+    throw err;
+  }
+}
+
+/** After a flagged group mutation, get the authoritative roster before changing crypto membership. */
+export async function addMlsGroupMembers(conversationId: string, memberIds: string[], userId: string): Promise<void> {
+  await api('POST', `/conversations/${conversationId}/members`, { userIds: memberIds });
+  const { conversation } = await api<{ conversation: Conversation }>('GET', `/conversations/${conversationId}`);
+  await reconcileMlsMembership(conversation, userId, memberIds);
+  await (await import('./engine')).refreshConversation(conversationId);
+}
+
+export async function removeMlsGroupMember(conversationId: string, memberId: string, userId: string): Promise<void> {
+  const { conversation } = await api<{ conversation: Conversation }>('GET', `/conversations/${conversationId}`);
+  if (conversationCanUseMls(conversation)) {
+    if (conversation.myRole !== 'admin' && conversation.myRole !== 'owner') {
+      throw new Error('Only a group admin can remove members');
+    }
+    await removeMlsMember(conversation, userId, memberId);
+  }
+  await api('DELETE', `/conversations/${conversationId}/members/${memberId}`);
+  await (await import('./engine')).refreshConversation(conversationId);
 }

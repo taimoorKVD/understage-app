@@ -17,6 +17,7 @@ import { convTitle, otherMember, preview } from '../../../lib/format';
 import type { LocalMessage } from '../../../lib/db';
 import { startCall, callsAvailable } from '../../../lib/calls';
 import type { PublicUser } from '../../../lib/types';
+import { removeMlsGroupMember } from '../../../lib/mls-session';
 
 const MAX_FILE = 25 * 1024 * 1024;
 const att0 = (mime: string, name: string, size: number) => ({ id: '', key: '', nonce: '', mime, name, size });
@@ -236,7 +237,7 @@ function GroupInfo({ visible, onClose, convId }: { visible: boolean; onClose: ()
           {m.id !== me.id ? <Tap testID={`dm-${m.id}`} onPress={async () => { onClose(); try { router.push(`/chat/${await openDirect(m.id)}`); } catch (e) { toast(errMsg(e)); } }} style={{ padding: 6 }}><Icon name="chat" size={18} color={C.gold} /></Tap> : null}
           {admin && conv.kind === 'group' && m.id !== me.id ? <>
             <Tap testID={`role-${m.id}`} onPress={() => act(() => api('PATCH', `/conversations/${convId}/members/${m.id}`, { role: m.convRole === 'admin' ? 'member' : 'admin' }))} style={{ padding: 6 }}><Icon name="star" size={18} color={m.convRole === 'admin' ? C.gold : C.muted} /></Tap>
-            <Tap testID={`rm-${m.id}`} onPress={() => act(() => api('DELETE', `/conversations/${convId}/members/${m.id}`), 'Removed')} style={{ padding: 6 }}><Icon name="x" size={18} color={C.red} /></Tap>
+            <Tap testID={`rm-${m.id}`} onPress={() => act(() => removeMlsGroupMember(convId, m.id, me.id), 'Removed')} style={{ padding: 6 }}><Icon name="x" size={18} color={C.red} /></Tap>
           </> : null}
         </Row>))}
       {conv.kind === 'group' && admin ? <Button testID="gadd" title="Add people" variant="secondary" onPress={() => { onClose(); router.push({ pathname: '/new-group', params: { addTo: convId } }); }} /> : null}

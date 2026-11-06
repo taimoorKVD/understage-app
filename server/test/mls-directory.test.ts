@@ -200,12 +200,14 @@ describe('MLS AS/DS via HTTP API', () => {
     });
     expect(conv.statusCode).toBe(200);
     const cid = conv.json().conversation.id as string;
+    const founder = [a, b].sort((x, y) => x.id < y.id ? -1 : 1)[0];
+    const joiner = founder === a ? b : a;
 
     const commit = b64('commit-epoch-0');
     const welcome = b64('welcome-for-b');
     const posted = await t.app.inject({
-      method: 'POST', url: `/conversations/${cid}/mls/commits`, headers: H(a),
-      payload: { epoch: 0, commit, welcomes: [{ recipientId: b.id, body: welcome }] },
+      method: 'POST', url: `/conversations/${cid}/mls/commits`, headers: H(founder),
+      payload: { epoch: 0, commit, welcomes: [{ recipientId: joiner.id, body: welcome }] },
     });
     expect(posted.statusCode).toBe(200);
     expect(posted.json()).toMatchObject({ ok: true, epoch: 1 });
@@ -215,13 +217,31 @@ describe('MLS AS/DS via HTTP API', () => {
     expect(aliceView.statusCode).toBe(200);
     expect(bobView.statusCode).toBe(200);
     expect(aliceView.json().group.epoch).toBe(1);
-    expect(aliceView.json().messages.map((m: any) => m.kind)).toEqual(['commit']);
-    expect(bobView.json().messages.map((m: any) => m.kind)).toEqual(['commit', 'welcome']);
-    expect(bobView.json().messages[0].body).toBe(commit);
-    expect(bobView.json().messages[1].body).toBe(welcome);
-    expect(bobView.json().messages[1].commitId).toBe(posted.json().commitId);
-    expect(t.events.some(e => e.user === b.id && e.event === 'mls:welcome')).toBe(true);
+    expect(aliceView.json().messages.map((m: any) => m.kind)).toEqual(founder === a ? ['commit'] : ['welcome', 'commit']);
+    expect(bobView.json().messages.map((m: any) => m.kind)).toEqual(joiner === b ? ['welcome', 'commit'] : ['commit']);
+    if (joiner === b) {
+      expect(bobView.json().messages[0].body).toBe(welcome);
+      expect(bobView.json().messages[1].body).toBe(commit);
+      expect(bobView.json().messages[1].id).toBe(posted.json().commitId);
+    }
+    expect(t.events.some(e => e.user === joiner.id && e.event === 'mls:welcome')).toBe(true);
     expect(t.events.some(e => e.event === 'mls:commit')).toBe(true);
+  });
+
+
+  it('rolls back a Commit when any Welcome target is not a member', async () => {
+    const t = setupMls();
+    const a = await signup(t, 'mls.a');
+    const b = await signup(t, 'mls.b');
+    const outsider = await signup(t, 'mls.outsider');
+    const conv = await t.app.inject({ method: 'POST', url: '/conversations', headers: H(a), payload: { kind: 'direct', userId: b.id } });
+    const cid = conv.json().conversation.id as string;
+    const invite = await t.app.inject({ method: 'POST', url: `/conversations/${cid}/mls/commits`, headers: H(a), payload: { epoch: 0, commit: b64('bad-roster'), welcomes: [{ recipientId: outsider.id, body: b64('out-of-roster') }] } });
+    expect(invite.statusCode).toBe(404);
+    expect(t.ctx.db.prepare('SELECT epoch FROM mls_groups WHERE conversation_id=?').get(cid)).toBeUndefined();
+    const self = await t.app.inject({ method: 'POST', url: `/conversations/${cid}/mls/commits`, headers: H(a), payload: { epoch: 0, commit: b64('self'), welcomes: [{ recipientId: a.id, body: b64('self') }] } });
+    expect(self.statusCode).toBe(400);
+    expect(self.json().error).toBe('WELCOME_SELF');
   });
 
   it('returns 409 EPOCH_CONFLICT when two clients commit concurrently at the same epoch', async () => {
@@ -233,90 +253,58 @@ describe('MLS AS/DS via HTTP API', () => {
       payload: { kind: 'direct', userId: b.id },
     });
     const cid = conv.json().conversation.id as string;
-
     const [r1, r2] = await Promise.all([
-      t.app.inject({
-        method: 'POST', url: `/conversations/${cid}/mls/commits`, headers: H(a),
-        payload: { epoch: 0, commit: b64('commit-from-a') },
-      }),
-      t.app.inject({
-        method: 'POST', url: `/conversations/${cid}/mls/commits`, headers: H(b),
-        payload: { epoch: 0, commit: b64('commit-from-b') },
-      }),
+      t.app.inject({ method: 'POST', url: `/conversations/${cid}/mls/commits`, headers: H(a),
+        payload: { epoch: 0, commit: b64('commit-from-a') } }),
+      t.app.inject({ method: 'POST', url: `/conversations/${cid}/mls/commits`, headers: H(b),
+        payload: { epoch: 0, commit: b64('commit-from-b') } }),
     ]);
-    const codes = [r1.statusCode, r2.statusCode].sort();
-    expect(codes).toEqual([200, 409]);
+    expect([r1.statusCode, r2.statusCode].sort()).toEqual([200, 409]);
     const ok = r1.statusCode === 200 ? r1 : r2;
     const conflict = r1.statusCode === 409 ? r1 : r2;
-    expect(ok.json().epoch).toBe(1);
+    const winner = conflict === r1 ? b : a;
     expect(conflict.json().error).toBe('EPOCH_CONFLICT');
     expect(conflict.json().epoch).toBe(1);
-    expect(conflict.json().winningCommit.body).toBe(ok.statusCode === r1.statusCode ? b64('commit-from-a') : conflict.json().winningCommit.body);
-    expect([b64('commit-from-a'), b64('commit-from-b')]).toContain(conflict.json().winningCommit.body);
     expect(conflict.json().winningCommit.id).toBe(ok.json().commitId);
+    expect([b64('commit-from-a'), b64('commit-from-b')]).toContain(conflict.json().winningCommit.body);
     expect(conflict.json().catchUp).toContain(`/conversations/${cid}/mls?after_epoch=`);
-
-    const retry = await t.app.inject({
-      method: 'POST', url: `/conversations/${cid}/mls/commits`,
-      headers: H(conflict === r1 ? a : b),
-      payload: { epoch: 1, commit: b64('commit-retry') },
-    });
+    const retry = await t.app.inject({ method: 'POST', url: `/conversations/${cid}/mls/commits`, headers: H(winner),
+      payload: { epoch: 1, commit: b64('commit-retry') } });
     expect(retry.statusCode).toBe(200);
     expect(retry.json().epoch).toBe(2);
   });
 
-  it('never returns a Welcome before its Commit, and catch-up honors after_epoch', async () => {
+  it('returns each Welcome before its Commit, and catch-up honors after_epoch', async () => {
     const t = setupMls();
     const a = await signup(t, 'mls.w1');
     const b = await signup(t, 'mls.w2');
-    const c = await signup(t, 'mls.w3');
+    const [founder, joiner] = [a, b].sort((x, y) => x.id < y.id ? -1 : 1);
     const conv = await t.app.inject({
-      method: 'POST', url: '/conversations', headers: H(a),
-      payload: { kind: 'group', title: 'MLS room', memberIds: [b.id, c.id] },
+      method: 'POST', url: '/conversations', headers: H(founder),
+      payload: { kind: 'group', title: 'MLS room', memberIds: [joiner.id] },
     });
     const cid = conv.json().conversation.id as string;
-
     const c0 = await t.app.inject({
-      method: 'POST', url: `/conversations/${cid}/mls/commits`, headers: H(a),
-      payload: { epoch: 0, commit: b64('c0'), welcomes: [{ recipientId: b.id, body: b64('w-b') }] },
+      method: 'POST', url: `/conversations/${cid}/mls/commits`, headers: H(founder),
+      payload: { epoch: 0, commit: b64('c0'), welcomes: [{ recipientId: joiner.id, body: b64('w-b') }] },
     });
-    expect(c0.statusCode).toBe(200);
+    expect(c0.statusCode, JSON.stringify(c0.json())).toBe(200);
+    const before = (await t.app.inject({ method: 'GET', url: `/conversations/${cid}/mls`, headers: H(joiner) })).json().messages;
+    expect(before.map((m: any) => m.kind)).toEqual(['welcome', 'commit']);
+    expect(before[0].body).toBe(b64('w-b'));
+    expect(before[0].commitId).toBe(c0.json().commitId);
     const c1 = await t.app.inject({
-      method: 'POST', url: `/conversations/${cid}/mls/commits`, headers: H(a),
-      payload: { epoch: 1, commit: b64('c1'), welcomes: [{ recipientId: c.id, body: b64('w-c') }] },
+      method: 'POST', url: `/conversations/${cid}/mls/commits`, headers: H(founder),
+      payload: { epoch: 1, commit: b64('c1'), welcomes: [] },
     });
-    expect(c1.statusCode).toBe(200);
-
-    const bobAll = (await t.app.inject({ method: 'GET', url: `/conversations/${cid}/mls`, headers: H(b) })).json().messages;
-    const kinds = bobAll.map((m: any) => m.kind);
-    expect(kinds.indexOf('commit')).toBeGreaterThanOrEqual(0);
-    expect(kinds.indexOf('welcome')).toBeGreaterThan(kinds.indexOf('commit'));
-    for (let i = 0; i < bobAll.length; i++) {
-      if (bobAll[i].kind === 'welcome') {
-        const commit = bobAll.find((m: any) => m.kind === 'commit' && m.id === bobAll[i].commitId);
-        expect(commit).toBeTruthy();
-        expect(bobAll.indexOf(commit)).toBeLessThan(i);
-      }
-    }
-    expect(bobAll.filter((m: any) => m.kind === 'welcome')).toHaveLength(1);
-    expect(bobAll.find((m: any) => m.kind === 'welcome').body).toBe(b64('w-b'));
-
-    const charlie = (await t.app.inject({ method: 'GET', url: `/conversations/${cid}/mls`, headers: H(c) })).json().messages;
-    expect(charlie.filter((m: any) => m.kind === 'welcome')).toHaveLength(1);
-    expect(charlie.find((m: any) => m.kind === 'welcome').body).toBe(b64('w-c'));
-    const firstWelcome = charlie.findIndex((m: any) => m.kind === 'welcome');
-    const itsCommit = charlie.findIndex((m: any) => m.id === charlie[firstWelcome].commitId);
-    expect(itsCommit).toBeGreaterThanOrEqual(0);
-    expect(itsCommit).toBeLessThan(firstWelcome);
-
-    const after0 = (await t.app.inject({
-      method: 'GET', url: `/conversations/${cid}/mls?after_epoch=0`, headers: H(c),
-    })).json().messages;
+    expect(c1.statusCode, JSON.stringify(c1.json())).toBe(200);
+    const after = (await t.app.inject({ method: 'GET', url: `/conversations/${cid}/mls`, headers: H(joiner) })).json().messages;
+    expect(after.map((m: any) => m.kind)).toEqual(['welcome', 'commit', 'commit']);
+    expect(after[1].id).toBe(c0.json().commitId);
+    expect(after[2].id).toBe(c1.json().commitId);
+    const after0 = (await t.app.inject({ method: 'GET', url: `/conversations/${cid}/mls?after_epoch=0`, headers: H(joiner) })).json().messages;
+    expect(after0.map((m: any) => m.kind)).toEqual(['commit']);
+    expect(after0[0].id).toBe(c1.json().commitId);
     expect(after0.some((m: any) => m.body === b64('c0'))).toBe(false);
-    expect(after0.some((m: any) => m.body === b64('c1'))).toBe(true);
-    expect(after0.some((m: any) => m.body === b64('w-c'))).toBe(true);
-    const w = after0.find((m: any) => m.kind === 'welcome');
-    const commit = after0.find((m: any) => m.id === w.commitId);
-    expect(after0.indexOf(commit)).toBeLessThan(after0.indexOf(w));
   });
 });

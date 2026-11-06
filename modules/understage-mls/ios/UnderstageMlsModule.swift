@@ -151,6 +151,13 @@ public class UnderstageMlsModule: Module {
     ]
   }
 
+  @ModuleDefinitionBuilder
+  public func definition() -> ModuleDefinition {
+    AsyncFunction("signaturePublicKey") { (sessionId: String) -> String in
+      try self.store.get(sessionId).signaturePublicKey().base64EncodedString()
+    }
+  }
+
   @JS(.concurrent)
   func epoch(sessionId: String) async throws -> Int {
     intEpoch(try store.get(sessionId).epoch())
