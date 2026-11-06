@@ -146,7 +146,7 @@ CREATE TABLE IF NOT EXISTS iap_transactions (
   environment TEXT,
   verified_at INTEGER NOT NULL
 );
-CREATE INDEX idx_iap_original_user ON iap_transactions(original_transaction_id, user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_iap_original_user ON iap_transactions(original_transaction_id, user_id);
 
 CREATE TABLE IF NOT EXISTS mls_key_packages (
   hash_ref TEXT PRIMARY KEY,
