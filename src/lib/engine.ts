@@ -111,7 +111,12 @@ export async function startSession() {
   unsubs.push(() => sub.remove());
   await refreshAll();
   checkTimezone();
-  import('./notifications').then(m => m.registerPush()).catch(() => {});
+  import('./notifications').then(m => {
+    m.ensureLocalNotifications().catch(() => {});
+    m.wireLocalNotifications();
+    // Remote Expo/APNs push is optional — Personal Team has no aps-environment.
+    m.registerPush().catch(() => {});
+  }).catch(() => {});
 }
 
 export async function refreshAll() {
