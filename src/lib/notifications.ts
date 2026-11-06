@@ -10,7 +10,7 @@ import { bus } from './events';
 import { useApp } from '../store/app';
 import { isOnShift } from './time';
 import type { ServerMessage } from './types';
-import { shouldPresentLocalAlert } from '../../shared/local-notify';
+import { localNotificationRoute, shouldPresentLocalAlert } from '../../shared/local-notify';
 export { shouldPresentLocalAlert } from '../../shared/local-notify';
 
 try {
@@ -203,8 +203,10 @@ export function useNotificationRouting() {
   const id = last?.notification.request.identifier;
   useEffect(() => {
     if (!last || last.actionIdentifier !== Notifications.DEFAULT_ACTION_IDENTIFIER) return;
-    const d = last.notification.request.content.data as any;
-    if (d?.conversationId) router.push(`/chat/${d.conversationId}`);
-    else if (d?.workspaceId) router.push(`/workspace/${d.workspaceId}`);
+    const route = localNotificationRoute(last.notification.request.content.data);
+    if (route?.kind === 'chat') router.push(`/chat/${route.conversationId}`);
+    else if (route?.kind === 'announcement') router.push(`/workspace/${route.workspaceId}?seg=a`);
+    else if (route?.kind === 'calls') router.push('/calls');
+    else if (route?.kind === 'chats') router.push('/');
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps -- route once per notification identifier; `last` is a new object each render
 }

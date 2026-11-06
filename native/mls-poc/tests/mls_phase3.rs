@@ -106,13 +106,9 @@ fn join_from_welcome(
     join_config: &MlsGroupJoinConfig,
     welcome: MlsMessageOut,
 ) -> MlsGroup {
-    let staged = StagedWelcome::new_from_welcome(
-        provider,
-        join_config,
-        into_welcome(welcome),
-        None,
-    )
-    .expect("stage Welcome");
+    let staged =
+        StagedWelcome::new_from_welcome(provider, join_config, into_welcome(welcome), None)
+            .expect("stage Welcome");
     staged.into_group(provider).expect("join from Welcome")
 }
 
@@ -139,10 +135,13 @@ fn new_member_cannot_read_old_messages_but_can_read_new_ones() {
     let group_config = create_config();
     let join_config = group_config.join_config().clone();
     let mut alice_group =
-        MlsGroup::new(&alice_provider, &alice_signer, &group_config, alice_cred)
-            .expect("create");
+        MlsGroup::new(&alice_provider, &alice_signer, &group_config, alice_cred).expect("create");
     let (add_bob, bob_welcome, _) = alice_group
-        .add_members(&alice_provider, &alice_signer, core::slice::from_ref(&bob_kp))
+        .add_members(
+            &alice_provider,
+            &alice_signer,
+            core::slice::from_ref(&bob_kp),
+        )
         .expect("add bob");
     let _ = add_bob;
     alice_group
@@ -206,10 +205,13 @@ fn attachment_content_key_travels_in_one_application_message() {
     let group_config = create_config();
     let join_config = group_config.join_config().clone();
     let mut alice_group =
-        MlsGroup::new(&alice_provider, &alice_signer, &group_config, alice_cred)
-            .expect("create");
+        MlsGroup::new(&alice_provider, &alice_signer, &group_config, alice_cred).expect("create");
     let (_, bob_welcome, _) = alice_group
-        .add_members(&alice_provider, &alice_signer, core::slice::from_ref(&bob_kp))
+        .add_members(
+            &alice_provider,
+            &alice_signer,
+            core::slice::from_ref(&bob_kp),
+        )
         .expect("add bob");
     alice_group
         .merge_pending_commit(&alice_provider)
@@ -242,10 +244,13 @@ fn delayed_commit_is_applied_on_catch_up() {
     let group_config = create_config();
     let join_config = group_config.join_config().clone();
     let mut alice_group =
-        MlsGroup::new(&alice_provider, &alice_signer, &group_config, alice_cred)
-            .expect("create");
+        MlsGroup::new(&alice_provider, &alice_signer, &group_config, alice_cred).expect("create");
     let (add_bob, bob_welcome, _) = alice_group
-        .add_members(&alice_provider, &alice_signer, core::slice::from_ref(&bob_kp))
+        .add_members(
+            &alice_provider,
+            &alice_signer,
+            core::slice::from_ref(&bob_kp),
+        )
         .expect("add bob");
     let _ = add_bob;
     alice_group
@@ -256,7 +261,11 @@ fn delayed_commit_is_applied_on_catch_up() {
 
     // Alice self-updates (a commit) while Bob is "offline".
     let update = alice_group
-        .self_update(&alice_provider, &alice_signer, LeafNodeParameters::default())
+        .self_update(
+            &alice_provider,
+            &alice_signer,
+            LeafNodeParameters::default(),
+        )
         .expect("alice self-update")
         .into_commit();
     alice_group
@@ -288,8 +297,7 @@ fn batch_add_200_members_one_application_message() {
     let group_config = create_config();
     let join_config = group_config.join_config().clone();
     let mut alice_group =
-        MlsGroup::new(&alice_provider, &alice_signer, &group_config, alice_cred)
-            .expect("create");
+        MlsGroup::new(&alice_provider, &alice_signer, &group_config, alice_cred).expect("create");
 
     let mut member_dbs = Vec::with_capacity(N - 1);
     let mut packages = Vec::with_capacity(N - 1);
@@ -314,22 +322,20 @@ fn batch_add_200_members_one_application_message() {
         .expect("merge batch");
     assert_eq!(alice_group.members().count(), N);
 
-    // Sample of joiners decrypt the same application message.
-    let sample = [0usize, 7, 42, 99, 198];
-    let mut sample_groups = Vec::new();
-    for idx in sample {
-        let (provider, _signer, _) = &members[idx];
+    // Every one of the 199 joiners, not just a sample, decrypts the same message.
+    let mut joiner_groups = Vec::with_capacity(N - 1);
+    for (provider, _signer, _) in &members {
         let group = join_from_welcome(provider, &join_config, welcome.clone());
         assert_eq!(group.members().count(), N);
-        sample_groups.push(group);
+        joiner_groups.push(group);
     }
 
     let body = b"200-member workspace cue";
     let sealed = alice_group
         .create_message(&alice_provider, &alice_signer, body)
         .expect("encrypt to 200");
-    for (i, group) in sample_groups.iter_mut().enumerate() {
-        let (provider, _, _) = &members[sample[i]];
+    for (i, group) in joiner_groups.iter_mut().enumerate() {
+        let (provider, _, _) = &members[i];
         assert_eq!(decrypt_application(group, provider, sealed.clone()), body);
     }
 
@@ -337,4 +343,65 @@ fn batch_add_200_members_one_application_message() {
     for db in member_dbs {
         let _ = std::fs::remove_file(&db);
     }
+}
+
+#[test]
+fn removed_member_cannot_read_new_messages_and_new_epoch_rejects_stale_ciphertext() {
+    let alice_db = db_path("rm-a");
+    let bob_db = db_path("rm-b");
+    let alice_provider = MlsProvider::open(&alice_db);
+    let bob_provider = MlsProvider::open(&bob_db);
+    let (alice_cred, alice_signer) = generate_identity(b"alice", &alice_provider);
+    let (bob_cred, bob_signer) = generate_identity(b"bob", &bob_provider);
+    let bob_kp = generate_key_package(&bob_provider, &bob_signer, bob_cred);
+    let group_config = create_config();
+    let join_config = group_config.join_config().clone();
+    let mut alice_group =
+        MlsGroup::new(&alice_provider, &alice_signer, &group_config, alice_cred).expect("create");
+    let (_, bob_welcome, _) = alice_group
+        .add_members(
+            &alice_provider,
+            &alice_signer,
+            core::slice::from_ref(&bob_kp),
+        )
+        .expect("add bob");
+    alice_group
+        .merge_pending_commit(&alice_provider)
+        .expect("merge bob");
+    let bob_index = alice_group
+        .members()
+        .find(|m| m.credential.serialized_content() == b"bob")
+        .expect("bob leaf")
+        .index;
+    let mut bob_group = join_from_welcome(&bob_provider, &join_config, bob_welcome);
+    let before = bob_group
+        .create_message(&bob_provider, &bob_signer, b"before removal")
+        .expect("before removal");
+    assert_eq!(
+        decrypt_application(&mut alice_group, &alice_provider, before.clone()),
+        b"before removal"
+    );
+    let (remove_bob, _, _) = alice_group
+        .remove_members(&alice_provider, &alice_signer, &[bob_index])
+        .expect("remove bob");
+    alice_group
+        .merge_pending_commit(&alice_provider)
+        .expect("merge removal");
+    let after = alice_group
+        .create_message(&alice_provider, &alice_signer, b"after removal")
+        .expect("after removal");
+    assert!(bob_group
+        .process_message(&bob_provider, into_protocol(after))
+        .is_err());
+    let stale = alice_group.process_message(&alice_provider, into_protocol(before));
+    assert!(
+        stale.is_err(),
+        "current epoch must reject a replayed pre-removal ciphertext"
+    );
+    assert!(alice_group
+        .members()
+        .all(|m| m.credential.serialized_content() != b"bob"));
+    let _ = remove_bob;
+    let _ = std::fs::remove_file(&alice_db);
+    let _ = std::fs::remove_file(&bob_db);
 }

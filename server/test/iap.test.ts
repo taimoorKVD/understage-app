@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPrivateKey, sign as cryptoSign } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
-import { verifySignedTransaction, planFromProductId } from '../src/iap';
+import { verifySignedTransaction, planFromProductId, iapVerificationReady } from '../src/iap';
 import { setup, signup, H } from './helpers';
 
 function run(dir: string, args: string[]) {
@@ -92,12 +92,34 @@ describe('App Store JWS verification', () => {
   });
 });
 
+describe('production entitlement trust', () => {
+  const previous = { env: process.env.NODE_ENV, enabled: process.env.IAP_VERIFY_ENABLED };
+  afterEach(() => {
+    if (previous.env === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previous.env;
+    if (previous.enabled === undefined) delete process.env.IAP_VERIFY_ENABLED; else process.env.IAP_VERIFY_ENABLED = previous.enabled;
+  });
+  it('never enables local PEM fixtures in production without the explicit StoreKit verification switch', () => {
+    const chain = generateChain();
+    try {
+      process.env.NODE_ENV = 'production';
+      delete process.env.IAP_VERIFY_ENABLED;
+      expect(iapVerificationReady([chain.rootPem])).toBe(false);
+      process.env.IAP_VERIFY_ENABLED = '1';
+      expect(iapVerificationReady([chain.rootPem])).toBe(true);
+      process.env.IAP_VERIFY_ENABLED = '0';
+      expect(iapVerificationReady([chain.rootPem])).toBe(false);
+    } finally { rmSync(chain.dir, { recursive: true, force: true }); }
+  });
+});
+
 describe('POST /subscriptions/verify', () => {
   const prevPem = process.env.APPLE_ROOT_CA_PEM;
   const prevEnabled = process.env.IAP_VERIFY_ENABLED;
+  const prevNodeEnv = process.env.NODE_ENV;
   afterEach(() => {
     if (prevPem === undefined) delete process.env.APPLE_ROOT_CA_PEM; else process.env.APPLE_ROOT_CA_PEM = prevPem;
     if (prevEnabled === undefined) delete process.env.IAP_VERIFY_ENABLED; else process.env.IAP_VERIFY_ENABLED = prevEnabled;
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
   });
 
   it('stays disabled without trusted roots and never grants from a raw transactionId or dev flag', async () => {

@@ -21,3 +21,28 @@ export function shouldPresentLocalAlert(opts: {
   if (opts.quietHours && opts.onShift === false) return false;
   return true;
 }
+
+export type LocalNotificationRoute =
+  | { kind: 'chat'; conversationId: string }
+  | { kind: 'announcement'; workspaceId: string; announcementId: string }
+  | { kind: 'workspace'; workspaceId: string }
+  | { kind: 'calls' }
+  | { kind: 'chats' }
+  | null;
+
+/** Validate untrusted notification payloads before handing their destination to expo-router. */
+export function localNotificationRoute(data: unknown): LocalNotificationRoute {
+  if (!data || typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  const callId = typeof d.callId === 'string' && d.callId.length > 0;
+  const conversationId = typeof d.conversationId === 'string' && d.conversationId.length > 0;
+  const workspaceId = typeof d.workspaceId === 'string' && d.workspaceId.length > 0;
+  const announcementId = typeof d.announcementId === 'string' && d.announcementId.length > 0;
+  if (d.kind === 'call' && callId) return { kind: 'calls' };
+  if (d.kind === 'message' && conversationId) return { kind: 'chat', conversationId: d.conversationId as string };
+  if (d.kind === 'announcement' && workspaceId && announcementId) {
+    return { kind: 'announcement', workspaceId: d.workspaceId as string, announcementId: d.announcementId as string };
+  }
+  if (d.kind === 'summary') return { kind: 'chats' };
+  return null;
+}

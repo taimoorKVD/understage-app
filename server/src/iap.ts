@@ -65,6 +65,8 @@ export function loadTrustedRootPems(): string[] {
 }
 
 export function iapVerificationReady(rootPems = loadTrustedRootPems()): boolean {
+  // Local chain fixtures are an explicit development-only override, never a production trust root.
+  if (process.env.NODE_ENV === 'production') return process.env.IAP_VERIFY_ENABLED === '1' && rootPems.length > 0;
   if (process.env.IAP_VERIFY_ENABLED === '0') return false;
   return rootPems.length > 0;
 }
