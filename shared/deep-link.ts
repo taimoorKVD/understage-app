@@ -11,11 +11,18 @@ function decodeSafely(value: string): string {
   try { return decodeURIComponent(value); } catch { return value; }
 }
 
+function withSearch(pathname: string, search: string): string {
+  const path = (pathname.startsWith('/') ? pathname : `/${pathname}`) || '/';
+  if (!search || search === '?') return path;
+  return `${path}${search.startsWith('?') ? search : `?${search}`}`;
+}
+
 /**
  * Rewrite a raw Linking / payload-url string into an Expo Router path.
  * Custom-scheme URLs like `understage://invite/TOKEN` are parsed with the token as
  * the hostname (`invite`) plus `/TOKEN`, which otherwise fails to produce an
  * initial navigation state. Dev-client launch URLs are sent to `/`.
+ * Non-invite query strings (orb menu, workspace segment) are preserved.
  */
 export function normalizeUnderstageDeepLink(path: string): string {
   const raw = String(path || '').trim();
@@ -27,8 +34,10 @@ export function normalizeUnderstageDeepLink(path: string): string {
   if (DEV_CLIENT_RE.test(raw)) return '/';
 
   if (raw.startsWith('/')) {
-    const clean = raw.split('?')[0] || '/';
-    return clean.startsWith('/') ? clean : `/${clean}`;
+    const q = raw.indexOf('?');
+    const clean = (q === -1 ? raw : raw.slice(0, q)) || '/';
+    const search = q === -1 ? '' : raw.slice(q);
+    return withSearch(clean.startsWith('/') ? clean : `/${clean}`, search);
   }
 
   try {
@@ -42,8 +51,8 @@ export function normalizeUnderstageDeepLink(path: string): string {
       pathname = pathname.replace(/\/+/g, '/') || '/';
       const nested = tokenFromInviteUrl(pathname);
       if (nested) return `/invite/${nested}`;
-      if (pathname === '/' || !pathname) return '/';
-      return pathname.startsWith('/') ? pathname : `/${pathname}`;
+      if (pathname === '/' || !pathname) return withSearch('/', u.search || '');
+      return withSearch(pathname.startsWith('/') ? pathname : `/${pathname}`, u.search || '');
     }
   } catch { /* fall through */ }
 

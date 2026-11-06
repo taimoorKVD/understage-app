@@ -28,6 +28,14 @@ describe('normalizeUnderstageDeepLink', () => {
     expect(normalizeUnderstageDeepLink('understage://')).toBe('/');
   });
 
+  it('preserves non-invite query strings used by the curtain dock and workspace tabs', () => {
+    expect(normalizeUnderstageDeepLink('understage:///?orb=1')).toBe('/?orb=1');
+    expect(normalizeUnderstageDeepLink('understage://?orb=1')).toBe('/?orb=1');
+    expect(normalizeUnderstageDeepLink('/?orb=1')).toBe('/?orb=1');
+    expect(normalizeUnderstageDeepLink('understage://workspace/w_M2IFshcmKU84?seg=d')).toBe('/workspace/w_M2IFshcmKU84?seg=d');
+    expect(normalizeUnderstageDeepLink('/workspace/w_M2IFshcmKU84?seg=d')).toBe('/workspace/w_M2IFshcmKU84?seg=d');
+  });
+
   it('tokenFromInviteUrl matches the scanner contract', () => {
     expect(tokenFromInviteUrl(`understage://invite/${TOKEN}`)).toBe(TOKEN);
     expect(tokenFromInviteUrl('https://evil.example/not-an-invite')).toBeNull();
