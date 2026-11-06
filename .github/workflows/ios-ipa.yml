@@ -1,0 +1,45 @@
+﻿name: Build unsigned iOS IPA
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'LICENSE']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: echo "EXPO_PUBLIC_API_URL=http://192.168.100.109:4000" > .env
+      - run: npm ci
+      - run: npx expo prebuild --platform ios --no-install
+      - run: cd ios && pod install
+      - name: Build (unsigned)
+        run: |
+          set -o pipefail
+          WS=$(ls -d ios/*.xcworkspace | head -1)
+          SCHEME=$(basename "$WS" .xcworkspace)
+          xcodebuild -workspace "$WS" -scheme "$SCHEME" -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" | tail -80
+          APP=$(ls -d build/Build/Products/Release-iphoneos/*.app | head -1)
+          mkdir -p Payload && cp -R "$APP" Payload/
+          zip -qry Understage-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Understage-unsigned-ipa
+          path: Understage-unsigned.ipa
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-build-${{ github.run_number }}
+          name: iOS test build ${{ github.run_number }}
+          prerelease: true
+          files: Understage-unsigned.ipa
+
+
