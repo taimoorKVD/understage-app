@@ -31,7 +31,15 @@ export function normalizeUnderstageDeepLink(path: string): string {
   const token = tokenFromInviteUrl(raw) || tokenFromInviteUrl(decodeSafely(raw));
   if (token) return `/invite/${token}`;
 
-  if (DEV_CLIENT_RE.test(raw)) return '/';
+  if (DEV_CLIENT_RE.test(raw)) {
+    const decoded = decodeSafely(raw);
+    if (decoded !== raw && /understage:\/\//i.test(decoded)) return normalizeUnderstageDeepLink(decoded);
+    try {
+      const nested = new URL(raw).searchParams.get('url');
+      if (nested && /^(?:exp\+)?understage:/i.test(nested)) return normalizeUnderstageDeepLink(nested);
+    } catch { /* malformed dev-client URL falls back to the safe home route */ }
+    return '/';
+  }
 
   if (raw.startsWith('/')) {
     const q = raw.indexOf('?');

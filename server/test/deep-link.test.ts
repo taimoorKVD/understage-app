@@ -36,6 +36,12 @@ describe('normalizeUnderstageDeepLink', () => {
     expect(normalizeUnderstageDeepLink('/workspace/w_M2IFshcmKU84?seg=d')).toBe('/workspace/w_M2IFshcmKU84?seg=d');
   });
 
+  it('preserves an app route embedded exactly once in a dev-client URL', () => {
+    const nested = `exp+understage://expo-development-client/?url=${encodeURIComponent('understage://mls-selftest')}`;
+    expect(normalizeUnderstageDeepLink(nested)).toBe('/mls-selftest');
+    expect(normalizeUnderstageDeepLink(nested)).not.toBe('/');
+  });
+
   it('tokenFromInviteUrl matches the scanner contract', () => {
     expect(tokenFromInviteUrl(`understage://invite/${TOKEN}`)).toBe(TOKEN);
     expect(tokenFromInviteUrl('https://evil.example/not-an-invite')).toBeNull();
