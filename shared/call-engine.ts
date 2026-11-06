@@ -117,6 +117,7 @@ export class CallEngine {
   private acceptingPromise: Promise<void> | null = null;
   private timers = new Map<TimerKey, unknown>();
   private restarts = 0;
+  private restartPending = false;
   private gen = 0;
   private t: CallTimeouts;
 
@@ -279,6 +280,7 @@ export class CallEngine {
   private onConn(state: string | undefined) {
     if (!this.live()) return;
     if (state === 'connected') {
+      this.restartPending = false;
       this.disarm('connect'); this.disarm('grace'); this.disarm('reconnect');
       this.restarts = 0;
       this.set({ phase: 'active', status: '', answeredAt: this.s.answeredAt ?? this.now() });
@@ -299,9 +301,10 @@ export class CallEngine {
   }
 
   private requestRestart() {
-    if (!this.pc || !this.s.callId || !this.live()) return;
+    if (!this.pc || !this.s.callId || !this.live() || this.restartPending) return;
     if (this.restarts >= this.t.maxIceRestarts) { this.hangup(this.s.answeredAt ? 'disconnected' : 'failed'); return; }
     this.restarts++;
+    this.restartPending = true;
     const callId = this.s.callId;
     if (this.s.direction === 'out') void this.enqueue(() => this.offer(callId, true));
     else this.d.signal(callId, { t: 'restart' });
@@ -317,7 +320,7 @@ export class CallEngine {
       this.d.signal(callId, { t: 'sdp', d: { type: 'offer', sdp: o.sdp } });
     } catch (e) {
       this.d.log?.(`offer failed: ${String((e as any)?.message ?? e)}`);
-      if (!iceRestart) this.hangup('failed');
+      this.hangup(iceRestart || this.s.answeredAt ? 'disconnected' : 'failed');
     }
   }
 
@@ -343,8 +346,10 @@ export class CallEngine {
     } else if (msg.t === 'restart' && this.s.direction === 'out') {
       if (this.s.phase === 'active') this.set({ phase: 'reconnecting', status: 'Reconnecting…' });
       if (this.s.phase === 'reconnecting') this.armReconnectDeadline();
+      if (this.restartPending) return;
       if (this.restarts >= this.t.maxIceRestarts) { this.hangup('disconnected'); return; }
       this.restarts++;
+      this.restartPending = true;
       await this.offer(callId, true);
     }
   }
@@ -363,7 +368,7 @@ export class CallEngine {
     try { stream?.getTracks().forEach(t => t.stop()); } catch {}
     try { stream?.release?.(); } catch {}
     try { pc?.close(); } catch {}
-    this.pendingIce.length = 0; this.queued.length = 0; this.restarts = 0;
+    this.pendingIce.length = 0; this.queued.length = 0; this.restarts = 0; this.restartPending = false;
     this.chain = Promise.resolve();
     if (hadMedia) void Promise.resolve(this.d.setAudio({ active: false, speaker: false })).catch(() => {});
   }

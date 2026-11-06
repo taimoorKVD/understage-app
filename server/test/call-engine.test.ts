@@ -3,7 +3,7 @@ import { CallEngine, parseSignal, endStatusText, type CallDeps, type CallSnapsho
 
 /** Fake RTCPeerConnection: records calls and lets the test drive connection-state events. */
 class FakePeer {
-  connectionState = 'new'; iceConnectionState = 'new'; remoteDescription: any = null; closed = false;
+  connectionState = 'new'; iceConnectionState = 'new'; remoteDescription: any = null; closed = false; failOffers = false;
   offers: any[] = []; answers = 0; ice: any[] = []; local: any[] = [];
   private l = new Map<string, Set<(e: any) => void>>();
   addEventListener(ev: string, fn: (e: any) => void) { if (!this.l.has(ev)) this.l.set(ev, new Set()); this.l.get(ev)!.add(fn); }
@@ -11,7 +11,7 @@ class FakePeer {
   listenerCount() { let n = 0; this.l.forEach(s => (n += s.size)); return n; }
   fire(ev: string, e: any = {}) { this.l.get(ev)?.forEach(f => f(e)); }
   setConn(s: string) { this.connectionState = s; this.fire('connectionstatechange'); }
-  async createOffer(o?: any) { this.offers.push(o ?? {}); return { type: 'offer', sdp: `offer-${this.offers.length}` }; }
+  async createOffer(o?: any) { this.offers.push(o ?? {}); if (this.failOffers) throw new Error('offer encoder failed'); return { type: 'offer', sdp: `offer-${this.offers.length}` }; }
   async createAnswer() { this.answers++; return { type: 'answer', sdp: `answer-${this.answers}` }; }
   async setLocalDescription(d: any) { this.local.push(d); }
   async setRemoteDescription(d: any) { this.remoteDescription = d; }
@@ -223,6 +223,27 @@ describe('call engine — media controls & reconnection', () => {
     const n = h.peer.offers.length;
     h.peer.setConn('disconnected'); h.clock.advance(1000); h.peer.setConn('connected'); h.clock.advance(5000); await flush();
     expect(h.peer.offers.length).toBe(n); expect(h.e.s.phase).toBe('active');
+  });
+
+  it('coalesces repeated failed/disconnected events and simultaneous restart requests', async () => {
+    const h = await activeCaller();
+    h.peer.setConn('failed'); h.peer.setConn('disconnected');
+    h.e.onSocketReconnected();
+    await h.e.onSignal('call-0001', { t: 'restart' });
+    await h.e.onSignal('call-0001', { t: 'restart' });
+    h.clock.advance(3000); await flush();
+    expect(h.peer.offers.filter(o => o.iceRestart)).toHaveLength(1);
+    expect(h.e.s.phase).toBe('reconnecting');
+    h.peer.setConn('connected');
+  });
+
+  it('fails deterministically instead of waiting forever when a restart offer cannot be created', async () => {
+    const h = await activeCaller();
+    h.clock.advance(1000);
+    h.peer.failOffers = true;
+    h.peer.setConn('failed'); await flush();
+    expect(h.e.s).toMatchObject({ phase: 'ended', endReason: 'disconnected' });
+    expect(h.sent.filter(s => s.ev === 'end')).toHaveLength(1);
   });
 
   it('gives up with "Connection lost" when reconnecting exceeds the deadline', async () => {
