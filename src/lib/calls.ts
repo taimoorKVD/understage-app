@@ -8,21 +8,18 @@ import { bus } from './events';
 import { getSocket, myId } from './engine';
 import { randomId } from './crypto';
 import { useApp } from '../store/app';
+import { CallEngine, IDLE_CALL, type CallSnapshot, type InviteResult, type SignalMsg } from '../../shared/call-engine';
 
 /**
  * 1:1 audio calls over WebRTC (react-native-webrtc). Media is DTLS-SRTP peer-to-peer (or via TURN, which can't decrypt).
  * Signalling (SDP + ICE) is sealed with nacl.box between the two identity keys, so the server can't swap the DTLS
  * fingerprint — that's what makes the media end-to-end rather than just transport-encrypted.
+ * The state machine, timeouts, ICE-restart and teardown logic live in shared/call-engine.ts (unit-tested);
+ * this file only adapts it to Socket.IO, nacl.box, react-native-webrtc and the iOS audio session (expo-audio).
  * react-native-webrtc is native: it only exists in a dev build (`npx expo run:ios`), never in Expo Go.
  */
-type Phase = 'idle' | 'outgoing' | 'incoming' | 'connecting' | 'active' | 'ended';
-interface CallState {
-  phase: Phase; callId: string | null; peerId: string | null; peerName: string; direction: 'out' | 'in';
-  answeredAt: number | null; muted: boolean; speaker: boolean; status: string;
-}
-export const useCall = create<CallState>(() => ({ phase: 'idle', callId: null, peerId: null, peerName: '', direction: 'out', answeredAt: null, muted: false, speaker: false, status: '' }));
-const cs = () => useCall.getState();
-const setC = (p: Partial<CallState>) => useCall.setState(p);
+export type { CallPhase } from '../../shared/call-engine';
+export const useCall = create<CallSnapshot>(() => ({ ...IDLE_CALL }));
 
 let rtc: any = null;
 function webrtc() {
@@ -32,100 +29,106 @@ function webrtc() {
 }
 export const callsAvailable = () => !!webrtc();
 
-let pc: any = null, local: any = null, peerPub: string | null = null;
-const pendingIce: any[] = [];
+/** Peer identity keys by callId, used to seal/open that call's signalling. */
+const peerKeys = new Map<string, string>();
 
-function seal(data: unknown) {
-  const sk = useApp.getState().identity!.secretKey;
+function seal(callId: string, data: unknown) {
+  const sk = useApp.getState().identity?.secretKey; const pub = peerKeys.get(callId);
+  if (!sk || !pub) return null;
   const nonce = nacl.randomBytes(24);
-  const box = nacl.box(naclUtil.decodeUTF8(JSON.stringify(data)), nonce, naclUtil.decodeBase64(peerPub!), naclUtil.decodeBase64(sk));
+  const box = nacl.box(naclUtil.decodeUTF8(JSON.stringify(data)), nonce, naclUtil.decodeBase64(pub), naclUtil.decodeBase64(sk));
   return { n: naclUtil.encodeBase64(nonce), c: naclUtil.encodeBase64(box) };
 }
-function open(env: { n: string; c: string }) {
-  const sk = useApp.getState().identity!.secretKey;
-  const m = nacl.box.open(naclUtil.decodeBase64(env.c), naclUtil.decodeBase64(env.n), naclUtil.decodeBase64(peerPub!), naclUtil.decodeBase64(sk));
-  return m ? JSON.parse(naclUtil.encodeUTF8(m)) : null;
+function open(callId: string, env: { n: string; c: string }) {
+  const sk = useApp.getState().identity?.secretKey; const pub = peerKeys.get(callId);
+  if (!sk || !pub || typeof env?.n !== 'string' || typeof env?.c !== 'string') return null;
+  try {
+    const m = nacl.box.open(naclUtil.decodeBase64(env.c), naclUtil.decodeBase64(env.n), naclUtil.decodeBase64(pub), naclUtil.decodeBase64(sk));
+    return m ? JSON.parse(naclUtil.encodeUTF8(m)) : null;
+  } catch { return null; }
 }
-const signal = (data: unknown) => getSocket()?.emit('call:signal', { callId: cs().callId, data: seal(data) });
 
-async function peerKey(id: string) { const u = await api('GET', `/users/${id}`); return u.identityKey as string | null; }
+async function peerKey(id: string) { const u = await api('GET', `/users/${id}`); return (u.identityKey as string | null) ?? null; }
 
-async function makePc() {
-  const W = webrtc();
-  const ice = await api<{ iceServers: any[] }>('GET', '/calls/ice');
-  pc = new W.RTCPeerConnection({ iceServers: ice.iceServers });
-  local = await W.mediaDevices.getUserMedia({ audio: true, video: false });
-  local.getTracks().forEach((t: any) => pc.addTrack(t, local));
-  pc.addEventListener('icecandidate', (e: any) => { if (e.candidate) signal({ t: 'ice', c: e.candidate }); });
-  pc.addEventListener('connectionstatechange', () => {
-    const s = pc?.connectionState;
-    if (s === 'connected' && cs().phase !== 'active') setC({ phase: 'active', answeredAt: Date.now(), status: '' });
-    if (s === 'failed') end('failed');
-  });
-  await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true, shouldRouteThroughEarpiece: !cs().speaker }).catch(() => {});
-}
+const callAudio = (active: boolean, speaker: boolean) => setAudioModeAsync(active
+  // Always send the full mode: expo-audio resets omitted fields to defaults (a partial call would drop the mic).
+  ? { allowsRecording: true, playsInSilentMode: true, interruptionMode: 'doNotMix', shouldPlayInBackground: true, shouldRouteThroughEarpiece: !speaker }
+  : { allowsRecording: false, playsInSilentMode: true, interruptionMode: 'mixWithOthers', shouldPlayInBackground: false, shouldRouteThroughEarpiece: false });
+
+const engine = new CallEngine({
+  invite: (callId, to) => new Promise<InviteResult>(resolve => {
+    const s = getSocket();
+    if (!s?.connected) return resolve({ ok: false, reason: 'offline' });
+    s.timeout(10_000).emit('call:invite', { callId, to }, (err: unknown, r: InviteResult) => resolve(err ? { ok: false, reason: 'offline' } : (r ?? { ok: false })));
+  }),
+  accept: callId => { getSocket()?.emit('call:accept', { callId }); },
+  decline: (callId, reason) => { getSocket()?.emit('call:decline', { callId, reason }); },
+  end: (callId, reason) => { getSocket()?.emit('call:end', { callId, reason }); peerKeys.delete(callId); },
+  signal: (callId, msg: SignalMsg) => { const data = seal(callId, msg); if (data) getSocket()?.emit('call:signal', { callId, data }); },
+  createMedia: async () => {
+    const W = webrtc(); if (!W) throw new Error('NO_WEBRTC');
+    const ice = await api<{ iceServers: any[] }>('GET', '/calls/ice');
+    const pc = new W.RTCPeerConnection({ iceServers: ice.iceServers, bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
+    try {
+      const stream = await W.mediaDevices.getUserMedia({ audio: true, video: false });
+      stream.getTracks().forEach((t: any) => pc.addTrack(t, stream));
+      return { pc, stream };
+    } catch (e) { try { pc.close(); } catch {} throw e; }
+  },
+  setAudio: ({ active, speaker }) => callAudio(active, speaker).catch(() => {}),
+  newId: randomId,
+  onChange: s => {
+    const prev = useCall.getState();
+    useCall.setState(s, true);
+    if (prev.phase !== s.phase && (s.phase === 'ended' || s.phase === 'idle')) {
+      if (prev.callId) peerKeys.delete(prev.callId);
+      if (s.phase === 'ended') bus.emit('calls:changed');
+    }
+  },
+  log: m => { if (__DEV__) console.log('[calls]', m); },
+});
 
 export async function startCall(peerId: string, peerName: string) {
   const { showToast } = useApp.getState();
-  if (cs().phase !== 'idle') return;
+  if (useCall.getState().phase !== 'idle' && useCall.getState().phase !== 'ended') return;
   if (!webrtc()) { showToast('Calls need the Understage dev build — Expo Go has no WebRTC'); return; }
-  peerPub = await peerKey(peerId).catch(() => null);
-  if (!peerPub) { showToast(`${peerName} hasn't set up encryption yet`); return; }
+  if (!getSocket()?.connected) { showToast('You are offline — calls need a connection'); return; }
+  const pub = await peerKey(peerId).catch(() => null);
+  if (!pub) { showToast(`${peerName} hasn't set up encryption yet`); return; }
   const callId = randomId();
-  setC({ phase: 'outgoing', callId, peerId, peerName, direction: 'out', answeredAt: null, muted: false, speaker: false, status: 'Calling…' });
-  getSocket()?.emit('call:invite', { callId, to: peerId }, (r: any) => {
-    if (r?.ok) setC({ status: r.calleeOnline ? 'Ringing…' : 'Calling…' });
-    else finish(r?.reason === 'held' ? `${peerName} is off shift · call held` : 'Call failed');
-  });
+  peerKeys.set(callId, pub);
+  await engine.start(peerId, peerName, callId);
 }
 export async function accept() {
-  if (cs().phase !== 'incoming') return;
   if (!webrtc()) { useApp.getState().showToast('Calls need the Understage dev build'); return decline(); }
-  setC({ phase: 'connecting', status: 'Connecting…' });
-  getSocket()?.emit('call:accept', { callId: cs().callId });
-  try { await makePc(); } catch { end('failed'); }
+  await engine.accept();
 }
-export function decline() { getSocket()?.emit('call:decline', { callId: cs().callId }); finish('Declined'); }
-export function end(reason: 'hangup' | 'failed' = 'hangup') { getSocket()?.emit('call:end', { callId: cs().callId, reason }); finish(reason === 'failed' ? 'Call failed' : 'Call ended'); }
-export function toggleMute() { const muted = !cs().muted; local?.getAudioTracks().forEach((t: any) => (t.enabled = !muted)); setC({ muted }); }
-export function toggleSpeaker() { const speaker = !cs().speaker; setC({ speaker }); setAudioModeAsync({ shouldRouteThroughEarpiece: !speaker }).catch(() => {}); }
+export function decline() { engine.decline(); }
+export function end(reason: 'hangup' | 'failed' = 'hangup') { engine.hangup(reason); }
+export function toggleMute() { engine.toggleMute(); }
+export function toggleSpeaker() { void engine.toggleSpeaker(); }
 
-function cleanup() { try { local?.getTracks().forEach((t: any) => t.stop()); pc?.close(); } catch {} pc = null; local = null; pendingIce.length = 0; }
-function finish(status: string) {
-  if (cs().phase === 'idle' || cs().phase === 'ended') return;
-  cleanup(); setC({ phase: 'ended', status });
-  setTimeout(() => { if (cs().phase === 'ended') setC({ phase: 'idle', callId: null, peerId: null, status: '' }); }, 1800);
-  bus.emit('calls:changed');
-}
-
-// ---- socket events (wired via the bus from engine.ts)
-bus.on('call:incoming', async (d: { callId: string; from: string; callerName: string }) => {
-  if (cs().phase !== 'idle') { getSocket()?.emit('call:decline', { callId: d.callId }); return; }
-  peerPub = await peerKey(d.from).catch(() => null);
-  if (!peerPub) return;
-  setC({ phase: 'incoming', callId: d.callId, peerId: d.from, peerName: d.callerName, direction: 'in', answeredAt: null, muted: false, speaker: false, status: 'Understage audio call…' });
-});
-bus.on('call:accepted', async (d: { callId: string }) => {
-  if (d.callId !== cs().callId) return;
-  setC({ phase: 'connecting', status: 'Connecting…' });
-  try { await makePc(); const offer = await pc.createOffer({}); await pc.setLocalDescription(offer); signal({ t: 'sdp', d: { type: offer.type, sdp: offer.sdp } }); } catch { end('failed'); }
-});
-bus.on('call:signal', async (d: { callId: string; from: string; data: any }) => {
-  if (d.callId !== cs().callId || d.from === myId()) return;
-  const msg = open(d.data); if (!msg) return; // forged/tampered signalling is ignored
-  const W = webrtc(); if (!W) return;
-  for (let i = 0; i < 40 && !pc; i++) await new Promise(r => setTimeout(r, 100));
-  if (!pc) return;
-  if (msg.t === 'sdp') {
-    await pc.setRemoteDescription(new W.RTCSessionDescription(msg.d));
-    if (msg.d.type === 'offer') { const a = await pc.createAnswer(); await pc.setLocalDescription(a); signal({ t: 'sdp', d: { type: a.type, sdp: a.sdp } }); }
-    for (const c of pendingIce.splice(0)) await pc.addIceCandidate(new W.RTCIceCandidate(c)).catch(() => {});
-  } else if (msg.t === 'ice') {
-    if (pc.remoteDescription) await pc.addIceCandidate(new W.RTCIceCandidate(msg.c)).catch(() => {}); else pendingIce.push(msg.c);
-  }
-});
-bus.on('call:ended', (d: { callId: string; reason: string }) => {
-  if (d.callId !== cs().callId) return;
-  finish({ declined: 'Declined', 'no-answer': 'No answer', held: `${cs().peerName} is off shift · call held`, failed: 'Call failed' }[d.reason] || 'Call ended');
-});
-bus.on('call:answered-elsewhere', (d: { callId: string }) => { if (d.callId === cs().callId) { cleanup(); setC({ phase: 'idle', callId: null }); } });
+// ---- socket events (wired via the bus from engine.ts). Re-evaluation (Fast Refresh) drops the previous module's handlers.
+const g = globalThis as any;
+g.__understageCallsOff?.();
+const offs = [
+  bus.on('call:incoming', async (d: { callId: string; from: string; callerName: string }) => {
+    if (!d?.callId || !d?.from) return;
+    const cur = useCall.getState();
+    if (cur.phase !== 'idle' && cur.phase !== 'ended') { engine.onIncoming(d); return; } // busy → auto-decline
+    const pub = await peerKey(d.from).catch(() => null);
+    if (!pub) { getSocket()?.emit('call:end', { callId: d.callId, reason: 'failed' }); return; }
+    peerKeys.set(d.callId, pub);
+    if (engine.onIncoming(d) === 'busy') peerKeys.delete(d.callId);
+  }),
+  bus.on('call:accepted', (d: { callId: string }) => { void engine.onAccepted(d); }),
+  bus.on('call:signal', (d: { callId: string; from: string; data: any }) => {
+    if (!d || d.from === myId() || d.callId !== useCall.getState().callId) return;
+    const msg = open(d.callId, d.data); if (!msg) return; // forged/tampered signalling is ignored
+    void engine.onSignal(d.callId, msg);
+  }),
+  bus.on('call:ended', (d: { callId: string; reason: string }) => { engine.onEnded(d); }),
+  bus.on('call:answered-elsewhere', (d: { callId: string }) => { engine.onAnsweredElsewhere(d); }),
+  bus.on('socket:connected', () => { engine.onSocketReconnected(); }),
+];
+g.__understageCallsOff = () => { offs.splice(0).forEach(f => f()); engine.hangup(); };

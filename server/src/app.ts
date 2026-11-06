@@ -1018,7 +1018,7 @@ export function buildApp(opts: Omit<Partial<Ctx>, 'cfg'> & { cfg?: Partial<Confi
     end(callId: string, reason: string) {
       const c = db.prepare('SELECT * FROM calls WHERE id=?').get(callId) as any;
       if (!c || c.ended_at) return c;
-      const status = c.status === 'active' ? 'completed' : reason === 'declined' ? 'declined' : reason === 'held' ? 'held' : 'missed';
+      const status = c.status === 'active' ? 'completed' : reason === 'declined' ? 'declined' : reason === 'busy' ? 'busy' : reason === 'held' ? 'held' : 'missed';
       db.prepare('UPDATE calls SET status=?, ended_at=?, end_reason=? WHERE id=?').run(status, ctx.clock(), reason, callId);
       return db.prepare('SELECT * FROM calls WHERE id=?').get(callId);
     },

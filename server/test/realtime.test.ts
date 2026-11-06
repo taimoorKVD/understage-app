@@ -43,12 +43,15 @@ describe('realtime (Socket.IO)', () => {
     expect(ack.ok).toBe(true);
     expect((await incoming).callerName).toBe('sophie.sm');
     const accepted = once(sa, 'call:accepted'); sb.emit('call:accept', { callId: 'call-rt-1' }); await accepted;
-    const sig = once(sb, 'call:signal'); sa.emit('call:signal', { callId: 'call-rt-1', data: { type: 'offer', sdp: 'v=0' } });
-    expect((await sig).data.type).toBe('offer');
-    // a stranger cannot inject signals
+    // Signalling must be a sealed {n,c} box — plaintext SDP is dropped by the relay.
+    const sealed = { n: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', c: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBB' };
+    const sig = once(sb, 'call:signal'); sa.emit('call:signal', { callId: 'call-rt-1', data: sealed });
+    expect((await sig).data).toEqual(sealed);
+    // a stranger cannot inject signals (plaintext or sealed)
     const c = await signup(t as any, 'eve.x'); const sc = await sock(c.token);
     let leaked = false; sa.once('call:signal', () => { leaked = true; });
     sc.emit('call:signal', { callId: 'call-rt-1', data: { type: 'answer' } });
+    sc.emit('call:signal', { callId: 'call-rt-1', data: sealed });
     await new Promise(r => setTimeout(r, 200)); expect(leaked).toBe(false);
     let typed = false; sa.once('typing', () => { typed = true; });
     sc.emit('typing', { conversationId: conv.id, to: [a.id] });

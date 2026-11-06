@@ -425,7 +425,7 @@ function connectSocket() {
     timeout: 15_000,
     randomizationFactor: 0.4,
   });
-  socket.on('connect', () => { set({ socketConnected: true }); refreshAll(); });
+  socket.on('connect', () => { set({ socketConnected: true }); bus.emit('socket:connected'); refreshAll(); });
   socket.on('disconnect', () => set({ socketConnected: false }));
   socket.on('connect_error', async (e: Error) => {
     if (e.message === 'UNAUTHORIZED') { try { await api('GET', '/me'); } catch {} } // triggers token refresh; socket retries with new token
