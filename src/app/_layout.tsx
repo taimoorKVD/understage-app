@@ -18,6 +18,7 @@ import '../lib/calls';
 import { useNotificationRouting } from '../lib/notifications';
 import { ToastHost, BannerHost, CallOverlay, OffShiftOverlay, useShiftWatcher } from '../components/Overlays';
 import { Spinner } from '../components/ui';
+import { CurtainBg } from '../components/CurtainBg';
 
 function Watchers() { useNotificationRouting(); useShiftWatcher(); return null; }
 
@@ -28,7 +29,8 @@ export default function Root() {
   const ready = fonts && status !== 'loading';
   return (
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: C.bg }}>
-      <SafeAreaProvider>
+      <SafeAreaProvider style={{ flex: 1, backgroundColor: 'transparent' }}>
+        <CurtainBg />
         <StatusBar style="light" />
         {!ready ? (
           <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: C.bg }}><Spinner /></View>

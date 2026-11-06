@@ -1,9 +1,8 @@
 import React, { useCallback, useState } from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { C } from '../../../theme';
-import { T, Card, Row, Avatar, Button, Input, Label, Empty, ErrorText, Pill, s } from '../../../components/ui';
+import { C, DOCK_SPACE } from '../../../theme';
+import { T, Card, Row, Avatar, Button, Input, Label, Empty, ErrorText, Pill, s, Screen} from '../../../components/ui';
 import { Icon } from '../../../components/Icon';
 import { Sheet } from '../../../components/Sheet';
 import { api, errMsg } from '../../../lib/api';
@@ -27,10 +26,10 @@ export default function WorkspaceTab() {
     } catch (e) { setErr(errMsg(e)); } finally { setBusy(false); }
   };
   return (
-    <SafeAreaView style={s.screen} edges={['top']}>
+    <Screen style={s.screen} edges={['top']}>
       <Row style={{ paddingHorizontal: 18, paddingTop: 4, paddingBottom: 8 }}><T serif size={30} style={{ flex: 1 }}>Workspace</T>
         <Button testID="newws" title="New" icon="plus" variant="secondary" style={{ paddingVertical: 8, paddingHorizontal: 14 }} onPress={() => (me.plan === 'free' ? router.push('/paywall') : setOpen(true))} /></Row>
-      <ScrollView contentContainerStyle={[s.body, { flexGrow: 1 }]} refreshControl={<RefreshControl tintColor={C.gold} refreshing={refreshing} onRefresh={async () => { setRefreshing(true); await load(); setRefreshing(false); }} />}>
+      <ScrollView contentContainerStyle={[s.body, { flexGrow: 1, paddingBottom: DOCK_SPACE }]} refreshControl={<RefreshControl tintColor={C.gold} refreshing={refreshing} onRefresh={async () => { setRefreshing(true); await load(); setRefreshing(false); }} />}>
         {!wss.length ? <Empty icon="users" title="No production workspace yet" body="A workspace gives your company announcements with acknowledgements, departments and a member directory in everyone's local time." action={<Button testID="empty-newws" title={me.plan === 'free' ? 'Start a free trial' : 'Create a workspace'} onPress={() => (me.plan === 'free' ? router.push('/paywall') : setOpen(true))} />} /> : null}
         {wss.map(w => (
           <Card key={w.id} testID={`ws-${w.id}`} onPress={() => router.push(`/workspace/${w.id}`)}>
@@ -52,6 +51,6 @@ export default function WorkspaceTab() {
         <ErrorText>{err}</ErrorText>
         <Button testID="wscreate" title="Create workspace" loading={busy} disabled={name.trim().length < 2} onPress={create} />
       </Sheet>
-    </SafeAreaView>
+    </Screen>
   );
 }

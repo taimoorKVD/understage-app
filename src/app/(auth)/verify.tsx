@@ -1,9 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, TextInput, KeyboardAvoidingView, Platform, Pressable } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { C, F } from '../../theme';
-import { T, Button, Header, Input, Label, Card, Row, Tap, ErrorText, s } from '../../components/ui';
+import { T, Button, Header, Input, Label, Card, Row, Tap, ErrorText, s, Screen} from '../../components/ui';
 import { Icon } from '../../components/Icon';
 import { api, errMsg } from '../../lib/api';
 import { signedIn, finishOnboarding } from '../../lib/engine';
@@ -51,7 +50,7 @@ export default function Verify() {
   }
 
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <Header title={mode === 'signin' ? 'Sign in' : 'Verify your account'} subtitle={mode === 'signin' ? 'We will send you a code' : 'Step 1 of 5'} />
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
         <View style={s.body}>
@@ -93,6 +92,6 @@ export default function Verify() {
             : <Button testID="verify" title="Verify" disabled={code.length !== 6 || busy} loading={busy} onPress={() => verify(code)} />}
         </View>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </Screen>
   );
 }

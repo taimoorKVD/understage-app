@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { View, ScrollView, TextInput } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { C } from '../../../theme';
-import { T, Header, Card, Row, Tap, Label, Toggle, Button, ErrorText, Avatar, s } from '../../../components/ui';
+import { T, Header, Card, Row, Tap, Label, Toggle, Button, ErrorText, Avatar, s, Screen} from '../../../components/ui';
 import { Icon } from '../../../components/Icon';
 import { api, errMsg } from '../../../lib/api';
 import { useApp } from '../../../store/app';
@@ -25,15 +24,15 @@ export default function Report() {
     catch (e) { setErr(errMsg(e)); } finally { setBusy(false); }
   };
   if (done) return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <View style={[s.body, { flex: 1, alignItems: 'center', justifyContent: 'center' }]}>
         <View style={{ width: 72, height: 72, borderRadius: 36, backgroundColor: C.greenPill, alignItems: 'center', justifyContent: 'center' }}><Icon name="check" size={34} color={C.green} /></View>
         <T serif size={26}>Report sent</T><T mu style={{ textAlign: 'center' }} testID="repnum">Reference {done}. Our safety team reviews reports within 24 hours.{block ? ` ${u?.displayName ?? 'They'} can no longer contact you.` : ''}</T>
         <Button testID="repdone" title="Done" style={{ alignSelf: 'stretch', marginTop: 20 }} onPress={() => router.dismissTo('/')} />
       </View>
-    </SafeAreaView>);
+    </Screen>);
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <Header title="Report" subtitle={u?.displayName ?? undefined} />
       <ScrollView contentContainerStyle={s.body}>
         {u ? <Row><Avatar name={u.displayName ?? '?'} uri={u.avatar} size={40} /><T weight="700">{u.displayName}</T><T mu>@{u.username}</T></Row> : null}
@@ -46,6 +45,6 @@ export default function Report() {
         <ErrorText>{err}</ErrorText>
         <Button testID="rsend" title="Send report" variant="danger" loading={busy} disabled={!reason} onPress={submit} />
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }

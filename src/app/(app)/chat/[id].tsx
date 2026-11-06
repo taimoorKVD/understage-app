@@ -1,13 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { View, FlatList, KeyboardAvoidingView, Platform, TextInput } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { useAudioRecorder, useAudioRecorderState, RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio';
 import { File } from 'expo-file-system';
 import { C } from '../../../theme';
-import { T, Tap, Avatar, Row, Button, Spinner, s } from '../../../components/ui';
+import { T, Tap, Avatar, Row, Button, Spinner, s, Screen} from '../../../components/ui';
 import { Icon } from '../../../components/Icon';
 import { Sheet } from '../../../components/Sheet';
 import { Bubble } from '../../../components/Bubble';
@@ -109,7 +108,7 @@ export default function Chat() {
     send(id, { v: 1, type: 'doc', attachment: att0(a.mimeType ?? 'application/octet-stream', a.name, size), sentAt: Date.now() }, { uri: a.uri, mime: a.mimeType ?? 'application/octet-stream', name: a.name, size });
   };
 
-  if (!conv) return <SafeAreaView style={[s.screen, { alignItems: 'center', justifyContent: 'center' }]}><Spinner /></SafeAreaView>;
+  if (!conv) return <Screen style={[s.screen, { alignItems: 'center', justifyContent: 'center' }]}><Spinner /></Screen>;
   const title = convTitle(conv, me.id);
   const stranger = conv.kind === 'direct' && peer && !peer.isContact;
   const sub = conv.kind === 'direct'
@@ -118,9 +117,9 @@ export default function Chat() {
   const blockedMsg = peer?.blocked;
 
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
-      <Row style={{ paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: C.border }}>
-        <Tap testID="back" accessibilityLabel="Back" onPress={() => router.back()} style={{ padding: 4 }}><Icon name="back" size={24} color={C.text} /></Tap>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
+      <Row style={{ marginHorizontal: 12, marginTop: 4, marginBottom: 6, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 22, backgroundColor: C.glass, borderWidth: 1, borderColor: C.border }}>
+        <Tap testID="back" accessibilityLabel="Back" onPress={() => (router.canGoBack() ? router.back() : router.replace("/"))} style={{ padding: 4 }}><Icon name="back" size={24} color={C.text} /></Tap>
         <Tap testID="chathead" onPress={() => (conv.kind === 'direct' ? router.push(`/safety/${conv.id}`) : conv.kind === 'workspace' && conv.workspaceId ? router.push(`/workspace/${conv.workspaceId}`) : setInfoOpen(true))} style={{ flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
           <Avatar name={conv.kind === 'workspace' ? conv.workspace?.initial ?? title : title} uri={other?.avatar} size={38} bg={conv.kind === 'workspace' ? C.gold : undefined} />
           <View style={{ minWidth: 0, flex: 1 }}><T weight="700" size={16} numberOfLines={1}>{title}</T>{sub}</View>
@@ -154,7 +153,7 @@ export default function Chat() {
         ) : conv.e2eeError === 'GROUP_TOO_LARGE_FOR_E2EE' ? (
           <Row testID="e2ee-limited" style={{ justifyContent: 'center', padding: 14 }}><Icon name="lock" size={14} color={C.muted} /><T mu size={13}>This company chat is too large for end-to-end encryption (50 member limit). Use announcements instead.</T></Row>
         ) : rs.isRecording ? (
-          <Row style={{ padding: 10, gap: 12 }}>
+          <Row style={{ marginHorizontal: 12, marginBottom: 8, padding: 10, gap: 12, borderRadius: 28, backgroundColor: C.glass, borderWidth: 1, borderColor: C.border2 }}>
             <Tap testID="rec-cancel" onPress={() => stopRec(true)} style={{ padding: 6 }}><Icon name="x" size={22} color={C.muted} /></Tap>
             <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: C.red }} />
             <T style={{ flex: 1 }}>Recording · {Math.floor(rs.durationMillis / 60000)}:{String(Math.floor(rs.durationMillis / 1000) % 60).padStart(2, '0')}</T>
@@ -187,14 +186,14 @@ export default function Chat() {
                 <Tap onPress={() => setReplyingTo(null)} style={{ padding: 4 }}><Icon name="x" size={16} color={C.muted} /></Tap>
               </Row>
             ) : null}
-            <Row style={{ padding: 10, gap: 8, borderTopWidth: 1, borderTopColor: C.border }}>
-              <Tap testID="attach" accessibilityLabel="Attach" onPress={() => setAttachOpen(true)} style={{ padding: 4 }}><Icon name="clip" size={22} color={C.muted} /></Tap>
-              <View style={{ flex: 1, backgroundColor: C.input, borderRadius: 20, paddingHorizontal: 14, paddingVertical: Platform.OS === 'ios' ? 10 : 4 }}>
+            <Row style={{ marginHorizontal: 12, marginBottom: 8, padding: 6, gap: 8, borderRadius: 28, backgroundColor: C.glass, borderWidth: 1, borderColor: C.border2 }}>
+              <Tap testID="attach" accessibilityLabel="Attach" onPress={() => setAttachOpen(true)} style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: C.input, alignItems: 'center', justifyContent: 'center' }}><Icon name="plus" size={20} color={C.gold} /></Tap>
+              <View style={{ flex: 1, backgroundColor: C.input, borderRadius: 22, borderWidth: 1, borderColor: C.border, paddingHorizontal: 14, paddingVertical: Platform.OS === 'ios' ? 10 : 4 }}>
                 <TextInput testID="msg" value={text} onChangeText={t => { setText(t); if (Date.now() - lastTyping.current > 2500) { lastTyping.current = Date.now(); sendTyping(id); } }}
-                  placeholder="Message" placeholderTextColor={C.muted} multiline style={{ color: C.text, fontSize: 15, maxHeight: 110 }} />
+                  placeholder={other?.displayName ? `Message ${other.displayName.split(' ')[0]}…` : 'Message'} placeholderTextColor={C.muted} multiline style={{ color: C.text, fontSize: 15, maxHeight: 110 }} />
               </View>
               <Tap testID="sendbtn" accessibilityLabel={text.trim() ? 'Send' : 'Record voice note'} onPress={text.trim() ? sendText : startRec}
-                style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: C.gold, alignItems: 'center', justifyContent: 'center' }}>
+                style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: C.gold, alignItems: 'center', justifyContent: 'center', shadowColor: C.gold, shadowOpacity: 0.55, shadowRadius: 10, shadowOffset: { width: 0, height: 2 } }}>
                 <Icon name={text.trim() ? 'send' : 'mic'} size={21} color="#000" />
               </Tap>
             </Row>
@@ -214,7 +213,7 @@ export default function Chat() {
         )) : <T mu size={13}>No contacts to share yet.</T>}
       </Sheet>
       <GroupInfo visible={infoOpen} onClose={() => setInfoOpen(false)} convId={conv.id} />
-    </SafeAreaView>
+    </Screen>
   );
 }
 

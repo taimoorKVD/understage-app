@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { C } from '../../../theme';
-import { T, Header, Avatar, Row, Card, Button, Spinner, ErrorText, s } from '../../../components/ui';
+import { T, Header, Avatar, Row, Card, Button, Spinner, ErrorText, s, Screen} from '../../../components/ui';
 import { Icon } from '../../../components/Icon';
 import { api, errMsg } from '../../../lib/api';
 import { openDirect, refreshAll } from '../../../lib/engine';
@@ -23,7 +22,7 @@ export default function Invite() {
     } catch (e) { setErr(errMsg(e)); } finally { setBusy(false); }
   };
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <Header title={inv?.kind === 'workspace' ? 'Join workspace' : 'Add contact'} />
       <View style={[s.body, { justifyContent: 'flex-end' }]}>
         {!inv && !err ? <Spinner /> : null}
@@ -41,6 +40,6 @@ export default function Invite() {
         </Card> : null}
         <ErrorText>{err}</ErrorText>
       </View>
-    </SafeAreaView>
+    </Screen>
   );
 }

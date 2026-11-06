@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { router } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Button, Header, ErrorText, s } from '../../components/ui';
+import { Button, Header, ErrorText, s, Screen} from '../../components/ui';
 import { HoursEditor, type HoursValue } from '../../components/Hours';
 import { api, errMsg } from '../../lib/api';
 import { setMe } from '../../lib/engine';
@@ -19,7 +18,7 @@ export default function Hours() {
   const [v, setV] = useState<HoursValue>({ ...hoursFromMe(me), timezone: phoneTimezone(), followPhoneTz: true });
   const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <Header title="Working hours" subtitle="Step 4 of 5" />
       <ScrollView contentContainerStyle={[s.body, { flexGrow: 1 }]}>
         <HoursEditor value={v} onChange={setV} />
@@ -30,6 +29,6 @@ export default function Hours() {
           try { setMe(await api('PATCH', '/me', hoursToPatch(v))); router.push('/keys'); } catch (e) { setErr(errMsg(e)); } finally { setBusy(false); }
         }} />
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }

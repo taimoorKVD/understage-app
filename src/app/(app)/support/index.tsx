@@ -1,9 +1,8 @@
 import React, { useCallback, useState } from 'react';
 import { View, ScrollView, TextInput } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { C } from '../../../theme';
-import { T, Header, Card, Row, Label, Input, Button, ErrorText, Pill, Spinner, s } from '../../../components/ui';
+import { T, Header, Card, Row, Label, Input, Button, ErrorText, Pill, Spinner, s, Screen} from '../../../components/ui';
 import { api, errMsg } from '../../../lib/api';
 import { listTime } from '../../../lib/time';
 export default function Support() {
@@ -12,7 +11,7 @@ export default function Support() {
   const load = useCallback(() => api('GET', '/support/tickets').then(r => setTickets(r.tickets)).catch(e => { setErr(errMsg(e)); setTickets([]); }), []);
   useFocusEffect(useCallback(() => { load(); }, [load]));
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <Header title="Help & support" />
       <ScrollView contentContainerStyle={s.body} keyboardShouldPersistTaps="handled">
         <Label>New request</Label>
@@ -27,6 +26,6 @@ export default function Support() {
         {!tickets ? <Spinner /> : !tickets.length ? <T mu>No requests yet.</T> : tickets.map(t => (
           <Card key={t.id} testID={`tk-${t.id}`} onPress={() => router.push(`/support/${t.id}`)}><Row><View style={{ flex: 1 }}><T weight="600">{t.subject}</T><T mu size={12}>{listTime(t.created_at)}</T></View><Pill>{String(t.status).toUpperCase()}</Pill></Row></Card>))}
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }

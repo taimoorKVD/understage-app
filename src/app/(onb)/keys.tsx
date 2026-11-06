@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import Animated, { useSharedValue, useAnimatedStyle, withRepeat, withTiming, Easing } from 'react-native-reanimated';
 import { C } from '../../theme';
-import { T, Button, Header, Card, Row, Spinner, ErrorText, s } from '../../components/ui';
+import { T, Button, Header, Card, Row, Spinner, ErrorText, s, Screen} from '../../components/ui';
 import { Icon } from '../../components/Icon';
 import { ensureKeys, finishOnboarding } from '../../lib/engine';
 import { errMsg } from '../../lib/api';
@@ -24,10 +23,10 @@ export default function Keys() {
   };
   useEffect(() => { run(); }, []); // eslint-disable-line react-hooks/set-state-in-effect -- key setup must start once on mount and reports progress via setState
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <Header title="Securing your account" subtitle="Step 5 of 5" back={false} />
       <View style={[s.body, { alignItems: 'center', justifyContent: 'center', gap: 20 }]}>
-        <View style={{ width: 150, height: 150, borderRadius: 75, borderWidth: 2, borderColor: C.gold, backgroundColor: '#22190d', alignItems: 'center', justifyContent: 'center' }}>
+        <View style={{ width: 150, height: 150, borderRadius: 75, borderWidth: 2, borderColor: C.gold, backgroundColor: C.goldCard, alignItems: 'center', justifyContent: 'center' }}>
           <Icon name="key" size={70} color={C.gold} width={1.5} />
           <Animated.View style={[{ position: 'absolute', width: 166, height: 166, borderRadius: 83, borderWidth: 3, borderColor: 'transparent', borderTopColor: C.gold }, spin]} />
         </View>
@@ -46,6 +45,6 @@ export default function Keys() {
         {err ? <Button testID="kretry" title="Try again" variant="secondary" style={{ alignSelf: 'stretch' }} onPress={run} /> : null}
         <Button testID="kgo" title="Start messaging" disabled={!done} style={{ alignSelf: 'stretch' }} onPress={() => finishOnboarding()} />
       </View>
-    </SafeAreaView>
+    </Screen>
   );
 }

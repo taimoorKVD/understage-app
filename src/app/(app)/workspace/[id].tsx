@@ -1,10 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { View, FlatList, Share } from 'react-native';
 import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
-import { C } from '../../../theme';
-import { T, Card, Row, Avatar, Button, Tap, Pill, Bar, Input, Empty, Spinner, s } from '../../../components/ui';
+import { C, G } from '../../../theme';
+import { T, Card, Row, Avatar, Button, Tap, Pill, Bar, Input, Empty, Spinner, s, Screen} from '../../../components/ui';
 import { Icon } from '../../../components/Icon';
 import { api, errMsg } from '../../../lib/api';
 import { bus } from '../../../lib/events';
@@ -15,10 +14,13 @@ import type { Workspace, Announcement, WsMember } from '../../../lib/types';
 
 type Seg = 'a' | 'd' | 'm';
 export default function WorkspaceScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, seg: segParam } = useLocalSearchParams<{ id: string; seg?: string }>();
   const toast = useApp(st => st.showToast);
   const [ws, setWs] = useState<Workspace | null>(null); const [anns, setAnns] = useState<Announcement[] | null>(null);
-  const [seg, setSeg] = useState<Seg>('a'); const [members, setMembers] = useState<WsMember[] | null>(null); const [total, setTotal] = useState(0);
+  const segRaw = Array.isArray(segParam) ? segParam[0] : segParam;
+  const urlSeg: Seg | null = segRaw === 'd' || segRaw === 'm' || segRaw === 'a' ? segRaw : null;
+  const [segUser, setSeg] = useState<Seg | null>(null); const [members, setMembers] = useState<WsMember[] | null>(null); const [total, setTotal] = useState(0);
+  const seg: Seg = segUser ?? urlSeg ?? 'a';
   const [q, setQ] = useState(''); const [dept, setDept] = useState<string | null>(null); const [acking, setAcking] = useState<string | null>(null);
   const load = useCallback(async () => {
     try {
@@ -41,7 +43,7 @@ export default function WorkspaceScreen() {
     ];
     return () => offs.forEach(o => o());
   }, [id, load]);
-  if (!ws) return <SafeAreaView style={[s.screen, { alignItems: 'center', justifyContent: 'center' }]}><Spinner /></SafeAreaView>;
+  if (!ws) return <Screen style={[s.screen, { alignItems: 'center', justifyContent: 'center' }]}><Spinner /></Screen>;
   const admin = ws.myRole === 'owner' || ws.myRole === 'admin';
   const ack = async (a: Announcement) => {
     setAcking(a.id);
@@ -52,11 +54,11 @@ export default function WorkspaceScreen() {
 
   const header = (
     <View>
-      <LinearGradient colors={['#4a1626', '#1a1018']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ paddingHorizontal: 18, paddingVertical: 12 }}>
+      <LinearGradient colors={[...G.hero]} start={{ x: 0, y: 0 }} end={{ x: 0.25, y: 1 }} style={{ paddingHorizontal: 18, paddingTop: 12, paddingBottom: 28 }}>
         <Row>
           <Tap testID="back" onPress={() => (router.canGoBack() ? router.back() : router.replace('/workspace'))} style={{ padding: 2 }}><Icon name="back" size={22} color={C.text} /></Tap>
           <Avatar name={ws.initial} size={50} bg={C.gold} />
-          <View style={{ flex: 1 }}><T serif size={21} numberOfLines={2}>{ws.name}</T><T mu size={12.5} testID="wsmeta">{ws.memberCount} members{ws.venue ? ` · ${ws.venue}` : ''}</T></View>
+          <View style={{ flex: 1, minWidth: 0 }}><T serif size={24} numberOfLines={2}>{ws.name}</T><T mu size={12.5} testID="wsmeta">{ws.memberCount} members{ws.venue ? ` · ${ws.venue}` : ''}{ws.runLabel ? ` · ${ws.runLabel}` : ''}</T></View>
           {ws.conversationId ? <Tap testID="wschat" accessibilityLabel="Company chat" onPress={() => router.push(`/chat/${ws.conversationId}`)} style={{ padding: 6 }}><Icon name="chat" size={22} color={C.text} /></Tap> : null}
           <Tap testID="wsset" accessibilityLabel="Workspace settings" onPress={() => router.push(`/wsset/${ws.id}`)} style={{ padding: 6 }}><Icon name="gear" size={22} color={C.text} /></Tap>
         </Row>
@@ -77,19 +79,19 @@ export default function WorkspaceScreen() {
 
   const items: any[] = seg === 'a' ? anns ?? [] : seg === 'd' ? ws.departments : members ?? [];
   return (
-    <SafeAreaView style={s.screen} edges={['top']}>
-      <FlatList data={items} keyExtractor={(x: any) => x.id} ListHeaderComponent={header} contentContainerStyle={{ paddingBottom: 120, gap: 10 }}
+    <Screen style={s.screen} edges={['top']}>
+      <FlatList data={items} key={seg} keyExtractor={(x: any) => x.id} numColumns={seg === 'd' ? 2 : 1} ListHeaderComponent={header} contentContainerStyle={{ paddingBottom: 120, gap: 10 }} columnWrapperStyle={seg === 'd' ? { paddingHorizontal: 18, gap: 10 } : undefined}
         ListEmptyComponent={seg === 'a' ? (anns ? <Empty icon="mega" title="No announcements yet" body={admin ? 'Post a call time, a rota change or a safety note to everyone.' : 'Company announcements will appear here.'} /> : <Spinner />) : seg === 'm' && !members ? <Spinner /> : <Empty icon="users" title="Nothing here yet" action={admin && seg === 'm' ? <Button title="Invite people" onPress={invite} /> : undefined} />}
-        renderItem={({ item }) => <View style={{ paddingHorizontal: 18 }}>{
+        renderItem={({ item }) => <View style={{ paddingHorizontal: seg === 'd' ? 0 : 18, flex: seg === 'd' ? 1 : undefined }}>{
           seg === 'a' ? <AnnCard a={item} wrapped={!!ws.wrappedAt} acking={acking === item.id} onAck={() => ack(item)} onTrack={() => (item.mine || admin ? router.push(`/ack/${item.id}`) : null)} />
-          : seg === 'd' ? <Card testID={`dept-${item.id}`} onPress={() => { setDept(item.id); setSeg('m'); }}><Row><Icon name="users" size={18} color={C.gold} /><T size={15} style={{ flex: 1 }}>{item.name}</T><T mu size={13}>{item.count}</T><T mu>›</T></Row></Card>
+          : seg === 'd' ? <Card testID={`dept-${item.id}`} onPress={() => { setDept(item.id); setSeg('m'); }} style={{ minHeight: 108, justifyContent: 'space-between' }}><Icon name="users" size={18} color={C.gold} /><T size={14} weight="600" numberOfLines={2} style={{ marginTop: 8 }}>{item.name}</T><T gold serif size={28}>{item.count}</T></Card>
           : <MemberRow m={item} ws={ws} admin={admin} reload={loadMembers} />
         }</View>} />
       {admin && !ws.wrappedAt ? <>
         <Tap testID="newann" accessibilityLabel="New announcement" onPress={() => router.push(`/compose/${ws.id}`)} style={{ position: 'absolute', right: 20, bottom: 40, width: 56, height: 56, borderRadius: 28, backgroundColor: C.gold, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 10, shadowOffset: { width: 0, height: 8 } }}><Icon name="mega" size={24} color="#000" /></Tap>
         <Tap testID="wsinvite" accessibilityLabel="Invite" onPress={invite} style={{ position: 'absolute', right: 86, bottom: 46, width: 44, height: 44, borderRadius: 22, backgroundColor: C.input, alignItems: 'center', justifyContent: 'center' }}><Icon name="plus" size={20} color={C.gold} /></Tap>
       </> : null}
-    </SafeAreaView>
+    </Screen>
   );
 }
 

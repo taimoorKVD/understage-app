@@ -16,7 +16,7 @@ export function ToastHost() {
   if (!t) return null;
   return (
     <Animated.View key={t.id} entering={FadeIn} exiting={FadeOut} pointerEvents="none" style={{ position: 'absolute', bottom: ins.bottom + 90, left: 24, right: 24, alignItems: 'center', zIndex: 100 }}>
-      <View testID="toast" style={{ backgroundColor: '#2a2230', borderColor: C.border2, borderWidth: 1, paddingVertical: 11, paddingHorizontal: 16, borderRadius: 14 }}>
+      <View testID="toast" style={{ backgroundColor: C.glass, borderColor: C.border2, borderWidth: 1, paddingVertical: 11, paddingHorizontal: 16, borderRadius: 16 }}>
         <T size={14} weight="500" style={{ textAlign: 'center' }}>{t.text}</T>
       </View>
     </Animated.View>
@@ -29,7 +29,7 @@ export function BannerHost() {
   if (!b) return null;
   return (
     <Animated.View key={b.id} entering={FadeInUp} exiting={FadeOutUp} style={{ position: 'absolute', top: ins.top + 6, left: 10, right: 10, zIndex: 90 }}>
-      <Tap testID="banner" onPress={() => { useApp.setState({ banner: null }); b.onPress?.(); }} style={{ flexDirection: 'row', gap: 12, alignItems: 'center', backgroundColor: 'rgba(40,32,44,0.97)', borderRadius: 20, padding: 14, borderWidth: 1, borderColor: C.border2 }}>
+      <Tap testID="banner" onPress={() => { useApp.setState({ banner: null }); b.onPress?.(); }} style={{ flexDirection: 'row', gap: 12, alignItems: 'center', backgroundColor: C.glass, borderRadius: 20, padding: 14, borderWidth: 1, borderColor: C.border2 }}>
         <View style={{ width: 38, height: 38, borderRadius: 10, backgroundColor: C.red, alignItems: 'center', justifyContent: 'center' }}><Icon name={b.icon ?? 'chat'} size={20} color="#fff" /></View>
         <View style={{ flex: 1 }}>
           <T weight="700" size={14}>{b.title}</T>
@@ -58,7 +58,7 @@ export function CallOverlay() {
   const status = c.phase === 'active' && c.answeredAt ? dur(Math.max(0, now - c.answeredAt) / 1000) : c.status;
   return (
     <Modal visible animationType="fade" presentationStyle="fullScreen">
-      <View testID="call-overlay" style={{ flex: 1, backgroundColor: '#140c12', paddingTop: ins.top + 50, paddingBottom: ins.bottom + 40, alignItems: 'center' }}>
+      <View testID="call-overlay" style={{ flex: 1, backgroundColor: C.bg, paddingTop: ins.top + 50, paddingBottom: ins.bottom + 40, alignItems: 'center' }}>
         <Row gap={6}><Icon name="lock" size={13} color={C.gold} /><T size={12} gold weight="600">End-to-end encrypted audio</T></Row>
         <Avatar name={c.peerName} size={120} style={{ marginTop: 40 }} />
         <T serif size={32} style={{ marginTop: 22 }}>{c.peerName}</T>
@@ -85,7 +85,7 @@ export function OffShiftOverlay() {
   if (status !== 'ready' || !me || dismissed || !me.quietHours || isOnShift(me.shift, me.timezone, true)) return null;
   return (
     <Modal visible animationType="fade" presentationStyle="fullScreen">
-      <View testID="offshift" style={{ flex: 1, backgroundColor: '#0b0910', padding: 28, justifyContent: 'center', alignItems: 'center', gap: 16 }}>
+      <View testID="offshift" style={{ flex: 1, backgroundColor: C.bg, padding: 28, justifyContent: 'center', alignItems: 'center', gap: 16 }}>
         <View style={{ width: 110, height: 110, borderRadius: 55, backgroundColor: '#1d1726', alignItems: 'center', justifyContent: 'center' }}><Icon name="moon" size={54} color={C.violet} /></View>
         <T serif size={32}>You’re off shift</T>
         <T mu size={15} style={{ textAlign: 'center', lineHeight: 22 }}>Quiet hours are on. Messages and calls are held{'\n'}until your shift starts {nextShiftLabel(me.shift, me.timezone)} ({tzAbbr(me.timezone)}).</T>

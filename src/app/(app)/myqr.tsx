@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { View, Share } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import QRCode from 'react-native-qrcode-svg';
-import { T, Header, Avatar, Pill, Button, Spinner, ErrorText, s } from '../../components/ui';
+import { T, Header, Avatar, Pill, Button, Spinner, ErrorText, s, Screen} from '../../components/ui';
 import { api, errMsg } from '../../lib/api';
 import { useApp } from '../../store/app';
 
@@ -13,7 +12,7 @@ export default function MyQr() {
   const make = () => { setErr(null); fetchInvite(); };
   useEffect(() => { fetchInvite(); }, []); // create one invite on mount
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <Header title="My QR code" />
       <View style={[s.body, { alignItems: 'center', justifyContent: 'center', gap: 18 }]}>
         <View style={{ backgroundColor: '#fff', padding: 22, borderRadius: 24, width: 274, height: 274, alignItems: 'center', justifyContent: 'center' }} testID="qr">
@@ -28,6 +27,6 @@ export default function MyQr() {
         <Button testID="shareqr" title="Share invite link" variant="secondary" disabled={!inv} onPress={() => inv && Share.share({ message: `Add me on Understage: ${inv.url}` })} />
         <Button testID="newqr" title="Generate new code" variant="secondary" onPress={make} />
       </View>
-    </SafeAreaView>
+    </Screen>
   );
 }

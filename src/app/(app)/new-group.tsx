@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { View, FlatList } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { C } from '../../theme';
-import { T, Header, Input, Avatar, Button, Tap, Empty, ErrorText, s } from '../../components/ui';
+import { T, Header, Input, Avatar, Button, Tap, Empty, ErrorText, s, Screen} from '../../components/ui';
 import { Icon } from '../../components/Icon';
 import { api, errMsg } from '../../lib/api';
 import { createGroup, refreshConversation } from '../../lib/engine';
@@ -26,7 +25,7 @@ export default function NewGroup() {
     } catch (e) { setErr(errMsg(e)); } finally { setBusy(false); }
   };
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <Header title={addTo ? 'Add people' : 'New group'} subtitle={`${sel.length} selected · up to 50 per encrypted group`} />
       <View style={[s.body, { flex: 1 }]}>
         {!addTo ? <Input testID="gname" value={title} onChangeText={setTitle} placeholder="Group name, e.g. Lighting Dept" maxLength={60} /> : null}
@@ -43,6 +42,6 @@ export default function NewGroup() {
         <ErrorText>{err}</ErrorText>
         <Button testID="gcreate" title={addTo ? 'Add to group' : 'Create group'} loading={busy} disabled={!sel.length || (!addTo && !title.trim())} onPress={go} />
       </View>
-    </SafeAreaView>
+    </Screen>
   );
 }

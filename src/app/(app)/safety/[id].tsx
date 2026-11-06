@@ -1,10 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { View, ScrollView } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import QRCode from 'react-native-qrcode-svg';
 import { C } from '../../../theme';
-import { T, Header, Avatar, Row, Card, Button, Pill, Spinner, s } from '../../../components/ui';
+import { T, Header, Avatar, Row, Card, Button, Pill, Spinner, s, Screen} from '../../../components/ui';
 import { Icon } from '../../../components/Icon';
 import { useApp } from '../../../store/app';
 import { api, errMsg } from '../../../lib/api';
@@ -19,7 +18,7 @@ export default function Safety() {
   const other = conv ? otherMember(conv, me.id) : undefined;
   const [peer, setPeer] = useState<(PublicUser & { isContact: boolean; verified: boolean }) | null>(null); const [busy, setBusy] = useState(false);
   useEffect(() => { if (other) api('GET', `/users/${other.id}`).then(setPeer).catch(e => toast(errMsg(e))); }, [other?.id]); // eslint-disable-line react-hooks/exhaustive-deps -- refetch only when the peer id changes
-  if (!peer || !identity) return <SafeAreaView style={[s.screen, { alignItems: 'center', justifyContent: 'center' }]}><Spinner /></SafeAreaView>;
+  if (!peer || !identity) return <Screen style={[s.screen, { alignItems: 'center', justifyContent: 'center' }]}><Spinner /></Screen>;
   const first = (peer.displayName || '').split(' ')[0];
   const num = conversationSafetyNumber(
     { id: me.id, publicKey: identity.publicKey, mlsSignaturePublicKey: me.mlsSignaturePublicKey },
@@ -31,7 +30,7 @@ export default function Safety() {
     catch (e) { toast(errMsg(e)); } finally { setBusy(false); }
   };
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <Header title="Verify safety number" subtitle="End-to-end encryption" />
       <ScrollView contentContainerStyle={[s.body, { alignItems: 'center', gap: 14 }]}>
         <Row><Avatar name={me.displayName ?? ''} uri={me.avatar} size={56} /><Icon name="lock" size={22} color={C.gold} /><Avatar name={peer.displayName ?? ''} uri={peer.avatar} size={56} /></Row>
@@ -46,6 +45,6 @@ export default function Safety() {
           <Button testID="verify" title={peer.verified ? 'Mark as unverified' : 'Mark as verified'} variant={peer.verified ? 'secondary' : 'primary'} loading={busy} style={{ width: '100%' }} onPress={toggle} />
         </> : <T mu>{first} hasn’t set up encryption keys yet.</T>}
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }

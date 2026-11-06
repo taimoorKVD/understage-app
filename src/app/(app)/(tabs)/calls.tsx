@@ -1,9 +1,8 @@
 import React, { useCallback, useState } from 'react';
 import { View, FlatList, RefreshControl } from 'react-native';
 import { useFocusEffect } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { C } from '../../../theme';
-import { T, Row, Avatar, Tap, Empty, Spinner, s } from '../../../components/ui';
+import { C, DOCK_SPACE } from '../../../theme';
+import { T, Row, Avatar, Tap, Empty, Spinner, s, Screen} from '../../../components/ui';
 import { Icon } from '../../../components/Icon';
 import { api, errMsg } from '../../../lib/api';
 import { startCall, callsAvailable } from '../../../lib/calls';
@@ -23,9 +22,9 @@ export default function Calls() {
     startCall(c.other.id, c.other.displayName ?? '').catch(e => toast(errMsg(e)));
   };
   return (
-    <SafeAreaView style={s.screen} edges={['top']}>
+    <Screen style={s.screen} edges={['top']}>
       <T serif size={30} style={{ paddingHorizontal: 18, paddingTop: 4, paddingBottom: 8 }}>Calls</T>
-      {!calls ? <Spinner /> : <FlatList data={calls} keyExtractor={c => c.id} contentContainerStyle={{ flexGrow: 1 }}
+      {!calls ? <Spinner /> : <FlatList data={calls} keyExtractor={c => c.id} contentContainerStyle={{ flexGrow: 1, paddingBottom: DOCK_SPACE }}
         refreshControl={<RefreshControl tintColor={C.gold} refreshing={refreshing} onRefresh={async () => { setRefreshing(true); await load(); setRefreshing(false); }} />}
         ListEmptyComponent={<Empty icon="phone" title="No calls yet" body="End-to-end encrypted voice calls with your crew show up here." />}
         renderItem={({ item: c }) => {
@@ -40,6 +39,6 @@ export default function Calls() {
               <Tap testID={`callback-${c.id}`} accessibilityLabel="Call back" onPress={() => call(c)} style={{ padding: 8 }}><Icon name="phone" size={22} color={C.gold} /></Tap>
             </Row>);
         }} />}
-    </SafeAreaView>
+    </Screen>
   );
 }

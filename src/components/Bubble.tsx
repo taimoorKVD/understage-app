@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { View, Image, Share, Modal, Pressable, ActivityIndicator } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
-import { C } from '../theme';
+import { C, G } from '../theme';
 import { T, Tap, Avatar, Row, Bar, avatarColor } from './ui';
 import { Icon } from './Icon';
 import { fetchAttachment, localUriFor, retry, discard } from '../lib/engine';
@@ -40,10 +41,10 @@ function Voice({ m, att, durationSec, waveform, mine }: { m: LocalMessage; att: 
       <Tap testID={`play-${m.clientId}`} accessibilityLabel={st.playing ? 'Pause' : 'Play voice note'} onPress={toggle} style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: C.gold, alignItems: 'center', justifyContent: 'center' }}>
         {a.loading ? <ActivityIndicator size="small" color="#000" /> : <Icon name={st.playing ? 'pause' : 'play'} size={14} color="#000" />}
       </Tap>
-      <Row gap={2} style={{ height: 24 }}>
-        {bars.slice(0, 28).map((h, i) => <View key={i} style={{ width: 3, borderRadius: 2, height: Math.max(3, h * 24), backgroundColor: i / bars.length <= pct ? C.gold : mine ? '#e8d9c4' : '#a99' }} />)}
+      <Row gap={2} style={{ height: 28, alignItems: 'center' }}>
+        {bars.slice(0, 28).map((h, i) => <View key={i} style={{ width: 3, borderRadius: 2, height: Math.max(4, h * 28), backgroundColor: i / bars.length <= pct ? '#F0D59A' : 'rgba(216,178,106,0.38)' }} />)}
       </Row>
-      <T size={12} style={{ opacity: 0.8 }}>{st.playing ? dur(st.currentTime) : dur(durationSec)}</T>
+      <T size={12} gold>{st.playing ? dur(st.currentTime) : dur(durationSec)}</T>
       {a.err ? <T size={11} style={{ color: '#ff8a9a' }}>{a.err}</T> : null}
     </Row>
   );
@@ -89,9 +90,11 @@ function DocAtt({ m, att }: { m: LocalMessage; att: AttachmentRef }) {
   );
 }
 
-function TextBody({ text }: { text: string }) {
+function TextBody({ text, mine }: { text: string; mine: boolean }) {
   const parts = text.split(/(@[a-zA-Z0-9._]+)/g);
-  return <T size={15.5} selectable style={{ lineHeight: 21 }}>{parts.map((p, i) => p.startsWith('@') ? <T key={i} size={15.5} style={{ color: C.gold, lineHeight: 21 }}>{p}</T> : p)}</T>;
+  const ink = mine ? C.goldText : C.text;
+  const mention = mine ? '#6b3f12' : C.gold;
+  return <T size={15.5} selectable style={{ lineHeight: 21, color: ink }}>{parts.map((p, i) => p.startsWith('@') ? <T key={i} size={15.5} style={{ color: mention, lineHeight: 21 }}>{p}</T> : p)}</T>;
 }
 
 export function Bubble({ m, mine, senderName, group, replyPreview, onReply, readByNames }: { m: LocalMessage; mine: boolean; senderName: string; group: boolean; replyPreview?: string; onReply?: () => void; readByNames?: string[] }) {
@@ -99,7 +102,7 @@ export function Bubble({ m, mine, senderName, group, replyPreview, onReply, read
   if (b?.type === 'system') return <View style={{ alignSelf: 'center', backgroundColor: C.pill, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4, marginVertical: 4 }}><T size={12} gold>{b.text}</T></View>;
   let inner: React.ReactNode;
   if (!b) inner = <Row gap={6}><Icon name="lock" size={13} color={C.muted} /><T mu size={14} style={{ fontStyle: 'italic' }}>Couldn’t decrypt — sent to an older key on this account</T></Row>;
-  else if (b.type === 'text') inner = <TextBody text={b.text} />;
+  else if (b.type === 'text') inner = <TextBody text={b.text} mine={mine} />;
   else if (b.type === 'voice') inner = <Voice m={m} att={b.attachment} durationSec={b.durationSec} waveform={b.waveform} mine={mine} />;
   else if (b.type === 'image') inner = <ImageAtt m={m} att={b.attachment} caption={b.caption} w={b.width} h={b.height} />;
   else if (b.type === 'doc') inner = <DocAtt m={m} att={b.attachment} />;
@@ -114,13 +117,20 @@ export function Bubble({ m, mine, senderName, group, replyPreview, onReply, read
       readLabel = ` · Read by ${m.readBy}/${m.recipients}`;
     }
   }
-  const bubble = (
-    <View testID={`msg-${m.clientId}`} style={{ maxWidth: '80%', alignSelf: mine ? 'flex-end' : 'flex-start', backgroundColor: mine ? C.sent : C.recv, borderRadius: 18, borderBottomRightRadius: mine ? 6 : 18, borderBottomLeftRadius: mine ? 18 : 6, paddingHorizontal: 12, paddingVertical: 8 }}>
+  const shell = { maxWidth: '80%' as const, alignSelf: (mine ? 'flex-end' : 'flex-start') as 'flex-end' | 'flex-start', borderRadius: 18, borderBottomRightRadius: mine ? 6 : 18, borderBottomLeftRadius: mine ? 18 : 6, paddingHorizontal: 12, paddingVertical: 8, overflow: 'hidden' as const };
+  const innerBubble = (
+    <>
       {group && !mine ? <T size={12} weight="700" style={{ color: avatarColor(senderName) }}>{senderName}</T> : null}
-      {replyPreview ? <View style={{ borderLeftWidth: 2, borderLeftColor: C.gold, paddingLeft: 8, marginBottom: 4 }}><T size={12} mu numberOfLines={2}>{replyPreview}</T></View> : null}
+      {replyPreview ? <View style={{ borderLeftWidth: 2, borderLeftColor: mine ? C.goldText : C.gold, paddingLeft: 8, marginBottom: 4 }}><T size={12} numberOfLines={2} style={{ color: mine ? 'rgba(26,18,8,0.7)' : C.muted }}>{replyPreview}</T></View> : null}
       {inner}
-      <Row gap={4} style={{ alignSelf: 'flex-end', marginTop: 2 }}><T size={10.5} style={{ opacity: 0.65 }}>{clock(m.createdAt)}{readLabel}</T>{mine ? <Tick m={m} /> : null}</Row>
-    </View>
+      <Row gap={4} style={{ alignSelf: 'flex-end', marginTop: 2 }}><T size={10.5} style={{ opacity: 0.7, color: mine ? C.goldText : C.muted }}>{clock(m.createdAt)}{readLabel}</T>{mine ? <Tick m={m} /> : null}</Row>
+    </>
+  );
+  const voice = b?.type === 'voice';
+  const bubble = mine && !voice ? (
+    <LinearGradient testID={`msg-${m.clientId}`} colors={[...G.sent]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={shell}>{innerBubble}</LinearGradient>
+  ) : (
+    <View testID={`msg-${m.clientId}`} style={[shell, { backgroundColor: C.recv, borderWidth: 1, borderColor: voice ? C.border2 : C.border }]}>{innerBubble}</View>
   );
   const failed = mine && m.status === 'failed';
   const body = onReply ? <Tap onLongPress={onReply}>{bubble}</Tap> : bubble;

@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { View, ScrollView } from 'react-native';
 import { router } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { C } from '../../theme';
-import { T, Header, Input, Avatar, Row, Button, Spinner, s } from '../../components/ui';
+import { T, Header, Input, Avatar, Row, Button, Spinner, s, Screen} from '../../components/ui';
 import { Icon } from '../../components/Icon';
 import { api, errMsg } from '../../lib/api';
 import { openDirect } from '../../lib/engine';
@@ -29,7 +28,7 @@ export default function Add() {
     catch (e) { toast(errMsg(e)); } finally { setBusy(null); }
   };
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <Header title="Add contact" subtitle="Find people by username — never by phone number" />
       <View style={[s.body, { flex: 1 }]}>
         <Input testID="search" value={q} onChangeText={setQ} placeholder="Search @username" autoCapitalize="none" autoCorrect={false} autoFocus left={<Icon name="users" size={18} color={C.muted} />} right={loading ? <Spinner size={16} /> : null} />
@@ -47,6 +46,6 @@ export default function Add() {
           <Button testID="myqr" title="My QR" icon="qr" variant="secondary" style={{ flex: 1 }} onPress={() => router.push('/myqr')} />
         </Row>
       </View>
-    </SafeAreaView>
+    </Screen>
   );
 }

@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { View, ScrollView, TextInput } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { C } from '../../../theme';
-import { T, Header, Label, Input, Pill, Card, Row, Toggle, Tap, Button, ErrorText, s } from '../../../components/ui';
+import { T, Header, Label, Input, Pill, Card, Row, Toggle, Tap, Button, ErrorText, s, Screen} from '../../../components/ui';
 import { api, errMsg } from '../../../lib/api';
 import { useApp } from '../../../store/app';
 import type { Workspace } from '../../../lib/types';
@@ -24,7 +23,7 @@ export default function Compose() {
   };
   const tog = (id: string) => setDepts(d => { const cur = d ?? []; const n = cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id]; return n.length ? n : null; });
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <Header title="New announcement" subtitle={ws?.name} />
       <ScrollView contentContainerStyle={[s.body, { flexGrow: 1 }]} keyboardShouldPersistTaps="handled">
         <Label>Title</Label><Input testID="atitle" value={title} onChangeText={setTitle} maxLength={120} placeholder="Tech rehearsal moved to 14:00" />
@@ -44,6 +43,6 @@ export default function Compose() {
         <Button testID="post" title={`Post to ${count} people`} loading={busy} disabled={!title.trim() || !body.trim() || !count} onPress={post} />
         <T mu size={11} style={{ textAlign: 'center' }}>Announcements are not end-to-end encrypted: they’re encrypted in transit and stored on the Understage server.</T>
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }

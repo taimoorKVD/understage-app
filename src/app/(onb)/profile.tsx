@@ -1,10 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { View, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
 import { router } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { C } from '../../theme';
-import { T, Button, Header, Input, Label, Tap, Avatar, ErrorText, Spinner, s } from '../../components/ui';
+import { T, Button, Header, Input, Label, Tap, Avatar, ErrorText, Spinner, s, Screen} from '../../components/ui';
 import { Icon } from '../../components/Icon';
 import { api, errMsg } from '../../lib/api';
 import { setMe } from '../../lib/engine';
@@ -81,9 +80,9 @@ export function ProfileForm({ onDone, cta, editing }: { onDone: () => void; cta:
 
 export default function Profile() {
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <Header title="Create your work profile" subtitle="Step 2 of 5" back={false} />
       <ProfileForm cta="Continue" onDone={() => router.push('/identity')} />
-    </SafeAreaView>
+    </Screen>
   );
 }

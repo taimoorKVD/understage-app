@@ -1,9 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { View, ScrollView, TextInput } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { C } from '../../../theme';
-import { T, Header, Row, Button, ErrorText, Spinner, s } from '../../../components/ui';
+import { T, Header, Row, Button, ErrorText, Spinner, s, Screen} from '../../../components/ui';
 import { api, errMsg } from '../../../lib/api';
 import { listTime } from '../../../lib/time';
 export default function Ticket() {
@@ -13,7 +12,7 @@ export default function Ticket() {
   const load = useCallback(() => api('GET', `/support/tickets/${id}`).then(setD).catch(e => setErr(errMsg(e))), [id]);
   useEffect(() => { load(); }, [load]);
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <Header title={d?.ticket.subject ?? 'Support'} subtitle={d ? `Status: ${d.ticket.status}` : undefined} />
       <ScrollView contentContainerStyle={s.body}>
         {!d ? (err ? <ErrorText>{err}</ErrorText> : <Spinner />) : d.messages.map((m, i) => (
@@ -26,6 +25,6 @@ export default function Ticket() {
           setBusy(true); try { await api('POST', `/support/tickets/${id}/messages`, { body: text }); setText(''); await load(); } catch (e) { setErr(errMsg(e)); } finally { setBusy(false); }
         }} />
       </Row>
-    </SafeAreaView>
+    </Screen>
   );
 }

@@ -1,9 +1,8 @@
-import React from 'react';
-import { View, ScrollView, Alert } from 'react-native';
+import React, { useState } from 'react';
+import { View, ScrollView } from 'react-native';
 import { router } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { C } from '../../../theme';
-import { T, Card, Row, Avatar, Tap, Label, Pill, s } from '../../../components/ui';
+import { C, DOCK_SPACE } from '../../../theme';
+import { T, Card, Row, Avatar, Tap, Label, Pill, ConfirmDialog, s, Screen} from '../../../components/ui';
 import { Icon, IconName } from '../../../components/Icon';
 import { signOut } from '../../../lib/engine';
 import { useApp } from '../../../store/app';
@@ -18,9 +17,10 @@ function Item({ icon, title, sub, onPress, testID, danger }: { icon: IconName; t
 }
 export default function Settings() {
   const me = useApp(st => st.me)!;
+  const [out, setOut] = useState(false);
   return (
-    <SafeAreaView style={s.screen} edges={['top']}>
-      <ScrollView contentContainerStyle={s.body}>
+    <Screen style={s.screen} edges={['top']}>
+      <ScrollView contentContainerStyle={[s.body, { paddingBottom: DOCK_SPACE }]}>
         <T serif size={30}>Settings</T>
         <Card testID="editprofile" onPress={() => router.push('/edit-profile')}>
           <Row><Avatar name={me.displayName ?? '?'} uri={me.avatar} size={56} />
@@ -39,8 +39,9 @@ export default function Settings() {
           <Item testID="st-blocked" icon="block" title="Blocked people" onPress={() => router.push('/blocked')} />
           <Item testID="st-support" icon="help" title="Help & support" onPress={() => router.push('/support')} />
         </View>
-        <Item testID="signout" icon="logout" title="Sign out" danger onPress={() => Alert.alert('Sign out?', 'Your messages stay encrypted on this phone until you sign in again.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Sign out', style: 'destructive', onPress: () => signOut() }])} />
+        <Item testID="signout" icon="logout" title="Sign out" danger onPress={() => setOut(true)} />
       </ScrollView>
-    </SafeAreaView>
+      <ConfirmDialog visible={out} title="Sign out?" body="Your messages stay encrypted on this phone until you sign in again." confirm="Sign out" danger onClose={() => setOut(false)} onConfirm={() => signOut()} />
+    </Screen>
   );
 }

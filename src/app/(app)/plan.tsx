@@ -1,15 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { ScrollView, Linking } from 'react-native';
 import { router } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { T, Header, Card, Row, Bar, Button, Spinner, ErrorText, s } from '../../components/ui';
+import { T, Header, Card, Row, Bar, Button, Spinner, ErrorText, s, Screen} from '../../components/ui';
 import { api, errMsg } from '../../lib/api';
 import { fmtDate } from '../../lib/time';
 export default function PlanScreen() {
   const [d, setD] = useState<any>(null); const [err, setErr] = useState<string | null>(null);
   useEffect(() => { api('GET', '/subscriptions/me').then(setD).catch(e => setErr(errMsg(e))); }, []);
   return (
-    <SafeAreaView style={s.screen} edges={['top', 'bottom']}>
+    <Screen style={s.screen} edges={['top', 'bottom']}>
       <Header title="Subscription" />
       <ScrollView contentContainerStyle={s.body}>
         <ErrorText>{err}</ErrorText>
@@ -20,6 +19,6 @@ export default function PlanScreen() {
           <Button testID="manage" title="Manage in App Store" variant="secondary" onPress={() => Linking.openURL('https://apps.apple.com/account/subscriptions')} />
         </>}
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }
