@@ -47,9 +47,9 @@ export function CallOverlay() {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { if (c.phase !== 'active') return; const i = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(i); }, [c.phase]);
   if (c.phase === 'idle') return null;
-  const big = (icon: any, bg: string, label: string, onPress: () => void, testID: string, on?: boolean) => (
+  const big = (icon: any, bg: string, label: string, onPress: () => void, testID: string, on?: boolean, disabled = false) => (
     <View style={{ alignItems: 'center', gap: 8 }}>
-      <Tap testID={testID} accessibilityLabel={label} onPress={onPress} style={{ width: 70, height: 70, borderRadius: 35, backgroundColor: on ? C.text : bg, alignItems: 'center', justifyContent: 'center' }}>
+      <Tap testID={testID} accessibilityLabel={label} disabled={disabled} onPress={onPress} style={{ width: 70, height: 70, borderRadius: 35, backgroundColor: on ? C.text : bg, opacity: disabled ? 0.5 : 1, alignItems: 'center', justifyContent: 'center' }}>
         <Icon name={icon} size={28} color={on ? C.bg : '#fff'} />
       </Tap>
       <T size={12} mu>{label}</T>
@@ -65,7 +65,7 @@ export function CallOverlay() {
         <T mu size={15} style={{ marginTop: 6 }} testID="call-status">{status}</T>
         <View style={{ flex: 1 }} />
         {c.phase === 'incoming' ? (
-          <Row gap={70}>{big('x', C.red, 'Decline', decline, 'call-decline')}{big('phone', C.green, 'Accept', accept, 'call-accept')}</Row>
+          <Row gap={70}>{big('x', C.red, 'Decline', decline, 'call-decline')}{big('phone', C.green, c.accepting ? 'Accepting…' : 'Accept', accept, 'call-accept', false, c.accepting)}</Row>
         ) : c.phase === 'ended' ? null : (
           <View style={{ gap: 30, alignItems: 'center' }}>
             <Row gap={40}>{big('mic', '#2c2332', c.muted ? 'Unmute' : 'Mute', toggleMute, 'call-mute', c.muted)}{big('spk', '#2c2332', 'Speaker', toggleSpeaker, 'call-speaker', c.speaker)}</Row>

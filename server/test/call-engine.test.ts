@@ -29,13 +29,14 @@ class Clock {
 }
 const flush = () => new Promise(r => setTimeout(r, 0));
 
-function harness(opts: { micDenied?: boolean; inviteResult?: any } = {}) {
+function harness(opts: { micDenied?: boolean; inviteResult?: any; audioDelay?: boolean } = {}) {
   const clock = new Clock();
   const sent: { ev: string; callId: string; arg?: any }[] = [];
   const signals: SignalMsg[] = [];
   const audio: { active: boolean; speaker: boolean }[] = [];
   const states: CallSnapshot[] = [];
   let peer: FakePeer | null = null; let track: FakeTrack | null = null; let released = false;
+  let releaseAudio: (() => void) | null = null;
   const deps: CallDeps = {
     invite: async (callId, to) => { sent.push({ ev: 'invite', callId, arg: to }); return opts.inviteResult ?? { ok: true, calleeOnline: true }; },
     accept: callId => { sent.push({ ev: 'accept', callId }); },
@@ -48,14 +49,14 @@ function harness(opts: { micDenied?: boolean; inviteResult?: any } = {}) {
       const t = track;
       return { pc: peer, stream: { getTracks: () => [t], getAudioTracks: () => [t], release: () => { released = true; } } };
     },
-    setAudio: o => { audio.push(o); },
+    setAudio: o => { audio.push(o); return opts.audioDelay && o.active ? new Promise<void>(resolve => { releaseAudio = resolve; }) : undefined; },
     newId: () => 'call-0001',
     onChange: s => { states.push(s); },
     timers: { set: clock.set, clear: clock.clear },
     now: () => clock.t,
   };
   const e = new CallEngine(deps);
-  return { e, clock, sent, signals, audio, states, get peer() { return peer!; }, get track() { return track!; }, get released() { return released; } };
+  return { e, clock, sent, signals, audio, states, releaseAudio: () => releaseAudio?.(), get peer() { return peer!; }, get track() { return track!; }, get released() { return released; } };
 }
 
 describe('call engine — state machine', () => {
@@ -112,6 +113,39 @@ describe('call engine — state machine', () => {
     expect(h.sent.map(s => s.ev)).toEqual(['accept']);
     expect(h.signals[0]).toEqual({ t: 'sdp', d: { type: 'answer', sdp: 'answer-1' } });
     expect(h.peer.ice).toHaveLength(1);
+  });
+
+  it('drains an early offer and ICE sequentially after native audio setup', async () => {
+    const delayed = harness({ audioDelay: true });
+    delayed.e.onIncoming({ callId: 'call-in-1', from: 'u_a', callerName: 'Al' });
+    const accepting = delayed.e.accept();
+    const acceptingAgain = delayed.e.accept();
+    await flush();
+    await delayed.e.onSignal('call-in-1', { t: 'ice', c: { candidate: 'candidate:early', sdpMid: '0', sdpMLineIndex: 0 } });
+    await delayed.e.onSignal('call-in-1', { t: 'sdp', d: { type: 'offer', sdp: 'offer-early' } });
+    // Later signal delivery must go through the audio barrier; no direct early handling.
+    delayed.releaseAudio();
+    await Promise.all([accepting, acceptingAgain]); await flush();
+    expect(delayed.peer.answers).toBe(1);
+    expect(delayed.peer.local.map(x => x.type)).toEqual(['answer']);
+    expect(delayed.peer.ice).toEqual([{ candidate: 'candidate:early', sdpMid: '0', sdpMLineIndex: 0 }]);
+    expect(delayed.e.s.accepting).toBe(false);
+    delayed.e.onAnsweredElsewhere({ callId: 'call-in-1' });
+  });
+
+  it('re-entrant accept actions share one native setup and one accept signal', async () => {
+    const delayed = harness({ audioDelay: true });
+    delayed.e.onIncoming({ callId: 'call-in-1', from: 'u_a', callerName: 'Al' });
+    const accepting = delayed.e.accept();
+    await flush();
+    // A separate delayed invocation cannot pass the guard while native setup is underway.
+    const acceptingAgain = delayed.e.accept();
+    delayed.releaseAudio();
+    await Promise.all([accepting, acceptingAgain]);
+    await delayed.e.accept();
+    expect(delayed.sent.filter(s => s.ev === 'accept')).toHaveLength(1);
+    expect(delayed.audio.filter(a => a.active)).toHaveLength(1);
+    delayed.e.onAnsweredElsewhere({ callId: 'call-in-1' });
   });
 
   it('a second incoming call while busy is auto-declined with reason busy and does not disturb the first', async () => {
@@ -220,6 +254,20 @@ describe('call engine — media controls & reconnection', () => {
     h.peer.connectionState = 'disconnected';
     h.e.onSocketReconnected(); await flush();
     expect(h.peer.offers.at(-1)).toEqual({ iceRestart: true });
+  });
+
+  it('audio-session teardown during accept cannot leak queued signaling into an ended call', async () => {
+    const delayed = harness({ audioDelay: true });
+    delayed.e.onIncoming({ callId: 'call-in-1', from: 'u_a', callerName: 'Al' });
+    const accepting = delayed.e.accept();
+    await flush();
+    void delayed.e.onSignal('call-in-1', { t: 'sdp', d: { type: 'offer', sdp: 'offer-late' } });
+    delayed.e.onEnded({ callId: 'call-in-1', reason: 'hangup' });
+    delayed.releaseAudio();
+    await accepting; await flush();
+    expect(delayed.e.hasMedia).toBe(false);
+    expect(delayed.signals).toHaveLength(0);
+    expect(delayed.e.s.accepting).toBe(false);
   });
 
   it('hang-up, remote end and answered-elsewhere all release the mic and peer exactly once', async () => {

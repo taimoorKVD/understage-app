@@ -15,9 +15,11 @@ export type EndReason =
 export interface CallSnapshot {
   phase: CallPhase; callId: string | null; peerId: string | null; peerName: string; direction: 'out' | 'in';
   answeredAt: number | null; muted: boolean; speaker: boolean; status: string; endReason: EndReason | null;
+  /** Set while callee finishes native permission/mic setup, before SDP can be processed. */
+  accepting: boolean;
 }
 export const IDLE_CALL: CallSnapshot = {
-  phase: 'idle', callId: null, peerId: null, peerName: '', direction: 'out', answeredAt: null, muted: false, speaker: false, status: '', endReason: null,
+  phase: 'idle', callId: null, peerId: null, peerName: '', direction: 'out', answeredAt: null, muted: false, speaker: false, status: '', endReason: null, accepting: false,
 };
 
 export const CALL_TIMEOUTS = {
@@ -112,6 +114,7 @@ export class CallEngine {
   private pendingIce: SignalMsg[] = [];
   private queued: SignalMsg[] = [];
   private chain: Promise<void> = Promise.resolve();
+  private acceptingPromise: Promise<void> | null = null;
   private timers = new Map<TimerKey, unknown>();
   private restarts = 0;
   private gen = 0;
@@ -141,13 +144,22 @@ export class CallEngine {
   }
 
   async accept(): Promise<void> {
+    if (this.acceptingPromise) return this.acceptingPromise;
     if (this.s.phase !== 'incoming' || !this.s.callId) return;
     const callId = this.s.callId;
+    const operation = this.acceptIncoming(callId);
+    this.acceptingPromise = operation;
+    try { await operation; }
+    finally { if (this.acceptingPromise === operation) this.acceptingPromise = null; }
+  }
+
+  private async acceptIncoming(callId: string): Promise<void> {
     this.disarm('ring');
-    this.set({ phase: 'connecting', status: 'Connecting…' });
+    this.set({ phase: 'connecting', status: 'Connecting…', accepting: true });
     this.arm('connect', this.t.connectMs, () => this.hangup('failed'));
     this.d.accept(callId);
-    await this.ensureMedia(callId);
+    try { await this.ensureMedia(callId); }
+    finally { if (this.s.callId === callId) this.set({ accepting: false }); }
   }
 
   decline(): void {
@@ -244,13 +256,17 @@ export class CallEngine {
       return false;
     }
     this.pc = m.pc; this.stream = m.stream;
+    this.gen++;
+    const mediaGen = this.gen;
     this.applyMute(this.s.muted);
     this.on('icecandidate', (e: any) => { const c = e?.candidate; if (c && c.candidate) this.d.signal(callId, { t: 'ice', c: { candidate: c.candidate, sdpMid: c.sdpMid ?? null, sdpMLineIndex: c.sdpMLineIndex ?? null } }); });
     this.on('connectionstatechange', () => this.onConn(this.pc?.connectionState));
     this.on('iceconnectionstatechange', () => { const s = this.pc?.iceConnectionState; if (s === 'completed') this.onConn('connected'); else if (s === 'disconnected' || s === 'failed' || s === 'connected') this.onConn(s); });
     await Promise.resolve(this.d.setAudio({ active: true, speaker: this.s.speaker })).catch(() => {});
-    for (const q of this.queued.splice(0)) void this.enqueue(() => this.handle(callId, q));
-    return true;
+    if (mediaGen !== this.gen || this.s.callId !== callId || !this.live()) return false;
+    // Drain sequentially on the same promise chain as live signals so ICE cannot overtake an SDP offer.
+    for (const q of this.queued.splice(0)) await this.enqueue(() => this.handle(callId, q));
+    return mediaGen === this.gen && this.s.callId === callId && this.live();
   }
 
   private on(ev: string, fn: (e: any) => void) {
@@ -297,6 +313,7 @@ export class CallEngine {
       const o = await pc.createOffer(iceRestart ? { iceRestart: true } : {});
       if (this.pc !== pc) return;
       await pc.setLocalDescription(o);
+      if (this.pc !== pc || this.s.callId !== callId || !this.live()) return;
       this.d.signal(callId, { t: 'sdp', d: { type: 'offer', sdp: o.sdp } });
     } catch (e) {
       this.d.log?.(`offer failed: ${String((e as any)?.message ?? e)}`);
@@ -311,10 +328,12 @@ export class CallEngine {
       if (msg.d.type === 'offer' && this.s.direction === 'out') return; // caller never accepts offers (no glare)
       if (msg.d.type === 'answer' && this.s.direction === 'in') return;
       await pc.setRemoteDescription(msg.d);
+      if (this.pc !== pc || this.s.callId !== callId || !this.live()) return;
       if (msg.d.type === 'offer') {
         const a = await pc.createAnswer();
         if (this.pc !== pc) return;
         await pc.setLocalDescription(a);
+        if (this.pc !== pc || this.s.callId !== callId || !this.live()) return;
         this.d.signal(callId, { t: 'sdp', d: { type: 'answer', sdp: a.sdp } });
       }
       for (const c of this.pendingIce.splice(0)) if (c.t === 'ice') await pc.addIceCandidate(c.c).catch(() => {});
